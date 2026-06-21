@@ -336,6 +336,9 @@ router.get('/verify-payment', async (req, res) => {
 // ============================================================
 // 🔔 WEBHOOK FEDAPAY - Version corrigée
 // ============================================================
+// ============================================================
+// 🔔 WEBHOOK FEDAPAY - Version complète pour abonnements et ponctuels
+// ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     // ✅ Parsing robuste du body
@@ -352,7 +355,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     console.log('📥 Webhook reçu - body parsé:', JSON.stringify(body, null, 2));
 
-    // ✅ Accepter "event" ou "name" (FedaPay utilise "name")
+    // ✅ Accepter "event" ou "name"
     const event = body?.event || body?.name;
     const data = body?.data || body?.entity;
 
@@ -368,7 +371,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     console.log('📥 Événement reçu:', event);
     console.log('📥 Data ID:', data?.id);
 
-    // ✅ Accepter transaction.approved (et transaction.paid pour compatibilité)
+    // ✅ Accepter transaction.approved
     if (event === 'transaction.approved' || event === 'transaction.paid') {
       const transactionId = data.id;
       const metadata = data.metadata || {};
@@ -392,6 +395,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         });
       }
 
+      let paymentId = null;
+
       // ✅ 2. SI LE PAIEMENT N'EXISTE PAS - Le créer
       if (!payment) {
         console.warn('⚠️ Paiement non trouvé pour transaction:', transactionId);
@@ -412,6 +417,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
               is_ponctual: metadata.is_ponctual || false,
               order_data: metadata.order_data || null,
               transaction_id: transactionId,
+              abonnement_id: metadata.abonnement_id || null,
+              plan_id: metadata.plan_id || null,
             },
           })
           .select()
@@ -427,22 +434,49 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         }
 
         console.log('✅ Paiement créé depuis le webhook:', newPayment.id);
+        paymentId = newPayment.id;
 
-        // ✅ 3. CRÉER LA COMMANDE SI PONCTUELLE
-        if (metadata.is_ponctual) {
+        // ✅ 3. TRAITER L'ABONNEMENT OU LA COMMANDE PONCTUELLE
+        const isPonctual = metadata.is_ponctual || false;
+        const subscriptionId = metadata.abonnement_id || null;
+
+        if (subscriptionId) {
+          // ✅ ACTIVER L'ABONNEMENT
+          console.log('📦 Activation de l\'abonnement:', subscriptionId);
+          
+          const { data: subscription, error: subError } = await supabase
+            .from('abonnements')
+            .update({ 
+              status: 'actif',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', subscriptionId)
+            .select()
+            .single();
+
+          if (subError) {
+            console.error('❌ Erreur activation abonnement:', subError);
+          } else {
+            console.log('✅ Abonnement activé:', subscriptionId);
+            
+            // ✅ Notification d'activation
+            await supabase.from('notifications').insert({
+              user_id: newPayment.user_id,
+              title: '✅ Abonnement activé !',
+              body: `Votre abonnement est maintenant actif. Profitez de nos services !`,
+              type: 'paiement',
+              data: { 
+                subscription_id: subscriptionId,
+                status: 'actif',
+              },
+            });
+          }
+        } else if (isPonctual) {
+          // ✅ CRÉER LA COMMANDE PONCTUELLE
           await createPonctualOrder(newPayment, metadata, transactionId);
         }
 
-        // ✅ 4. SI ABONNEMENT - L'activer
-        if (metadata.abonnement_id) {
-          console.log('📦 Activation de l\'abonnement:', metadata.abonnement_id);
-          await supabase
-            .from('abonnements')
-            .update({ status: 'actif' })
-            .eq('id', metadata.abonnement_id);
-        }
-
-        // ✅ 5. NOTIFICATION
+        // ✅ 4. NOTIFICATION DE PAIEMENT
         await supabase.from('notifications').insert({
           user_id: newPayment.user_id,
           title: '✅ Paiement confirmé',
@@ -458,8 +492,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         });
       }
 
-      // ✅ 6. SI LE PAIEMENT EXISTE - Le mettre à jour
+      // ✅ 5. SI LE PAIEMENT EXISTE - Le mettre à jour
       console.log('✅ Paiement trouvé:', payment.id);
+      paymentId = payment.id;
 
       const { data: updatedPayment, error: updateError } = await supabase
         .from('paiements')
@@ -480,24 +515,47 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         });
       }
 
-      // ✅ 7. CRÉER LA COMMANDE SI PONCTUELLE
+      // ✅ 6. TRAITER L'ABONNEMENT OU LA COMMANDE PONCTUELLE
       const isPonctual = payment.metadata?.is_ponctual || metadata?.is_ponctual || false;
+      const subscriptionId = payment.metadata?.abonnement_id || metadata?.abonnement_id || null;
 
-      if (isPonctual) {
+      if (subscriptionId) {
+        // ✅ ACTIVER L'ABONNEMENT
+        console.log('📦 Activation de l\'abonnement:', subscriptionId);
+        
+        const { data: subscription, error: subError } = await supabase
+          .from('abonnements')
+          .update({ 
+            status: 'actif',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', subscriptionId)
+          .select()
+          .single();
+
+        if (subError) {
+          console.error('❌ Erreur activation abonnement:', subError);
+        } else {
+          console.log('✅ Abonnement activé:', subscriptionId);
+          
+          // ✅ Notification d'activation
+          await supabase.from('notifications').insert({
+            user_id: payment.user_id,
+            title: '✅ Abonnement activé !',
+            body: `Votre abonnement est maintenant actif. Profitez de nos services !`,
+            type: 'paiement',
+            data: { 
+              subscription_id: subscriptionId,
+              status: 'actif',
+            },
+          });
+        }
+      } else if (isPonctual) {
+        // ✅ CRÉER LA COMMANDE PONCTUELLE
         await createPonctualOrder(updatedPayment, metadata, transactionId);
       }
 
-      // ✅ 8. SI ABONNEMENT - L'activer
-      const subscriptionId = payment.metadata?.subscriptionId || metadata?.subscriptionId;
-      if (subscriptionId) {
-        console.log('📦 Activation de l\'abonnement:', subscriptionId);
-        await supabase
-          .from('abonnements')
-          .update({ status: 'actif' })
-          .eq('id', subscriptionId);
-      }
-
-      // ✅ 9. NOTIFICATION
+      // ✅ 7. NOTIFICATION DE PAIEMENT
       await supabase.from('notifications').insert({
         user_id: payment.user_id,
         title: '✅ Paiement confirmé',
@@ -530,7 +588,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     });
   }
 });
-
 // ============================================================
 // 🔧 FONCTION HELPER - Créer une commande ponctuelle
 // ============================================================
