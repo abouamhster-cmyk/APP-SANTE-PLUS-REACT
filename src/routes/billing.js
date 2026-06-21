@@ -334,30 +334,49 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - Version avec transaction.approved
+// 🔔 WEBHOOK FEDAPAY - Version avec parsing robuste
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    // Parser le body
+    // ✅ Parsing robuste du body
     let body = req.body;
+    
+    console.log('📥 Type de body reçu:', typeof body);
+    console.log('📥 Est-ce un Buffer?', Buffer.isBuffer(body));
+    console.log('📥 Est-ce un tableau?', Array.isArray(body));
+    
+    // Si c'est un Buffer, le convertir en string puis en JSON
     if (Buffer.isBuffer(body)) {
-      body = JSON.parse(body.toString('utf8'));
-    } else if (typeof body === 'string') {
+      const str = body.toString('utf8');
+      console.log('📥 Body en string:', str.substring(0, 200) + '...');
+      body = JSON.parse(str);
+    } 
+    // Si c'est une string, la parser en JSON
+    else if (typeof body === 'string') {
       body = JSON.parse(body);
     }
+    // Si c'est un tableau, on prend le premier élément
+    else if (Array.isArray(body) && body.length > 0) {
+      console.log('📥 Body est un tableau de', body.length, 'éléments');
+      body = body[0];
+    }
 
-    console.log('📥 Webhook reçu:', JSON.stringify(body, null, 2));
+    console.log('📥 Webhook reçu - body parsé:', JSON.stringify(body, null, 2));
 
     const event = body?.event;
     const data = body?.data;
 
     if (!event) {
-      console.warn('⚠️ Événement manquant');
+      console.warn('⚠️ Événement manquant dans le body:', body);
       return res.status(400).json({ 
         success: false, 
-        error: 'Événement manquant' 
+        error: 'Événement manquant',
+        received: body 
       });
     }
+
+    console.log('📥 Événement reçu:', event);
+    console.log('📥 Data ID:', data?.id);
 
     // ✅ Accepter transaction.approved (et transaction.paid pour compatibilité)
     if (event === 'transaction.approved' || event === 'transaction.paid') {
@@ -514,9 +533,11 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
   } catch (error) {
     console.error('❌ Webhook error:', error);
     console.error('❌ Stack:', error.stack);
+    console.error('❌ Body reçu brut:', req.body);
     return res.status(500).json({
       success: false,
       error: error.message || 'Erreur interne du webhook',
+      raw_body: req.body ? req.body.toString() : null,
     });
   }
 });
