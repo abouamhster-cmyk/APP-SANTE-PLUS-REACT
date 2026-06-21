@@ -1,0 +1,970 @@
+// 📁 backend/src/routes/auth.routes.js
+
+const express = require('express');
+const router = express.Router();
+const { supabase } = require('../services/supabase.service');
+const { sendEmail, templates } = require('../services/email.service');
+const authMiddleware = require('../middleware/auth.middleware');
+const roleMiddleware = require('../middleware/role.middleware');
+
+// =============================================
+// INSCRIPTION - Version avec support Aidant
+// =============================================
+router.post('/register', async (req, res) => {
+  console.log('📝 ===== REGISTER REQUEST =====');
+  console.log('📝 Body:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { 
+      email, 
+      password, 
+      full_name, 
+      phone, 
+      role, 
+      hasPatient, 
+      patientData, 
+      offreId,
+      aidantData
+    } = req.body;
+
+    // =============================================
+    // VALIDATION DES CHAMPS COMMUNS
+    // =============================================
+    console.log('🔍 Vérification des champs...');
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email est obligatoire' });
+    }
+    if (!password) {
+      return res.status(400).json({ success: false, error: 'Mot de passe est obligatoire' });
+    }
+    if (!full_name) {
+      return res.status(400).json({ success: false, error: 'Nom complet est obligatoire' });
+    }
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Téléphone est obligatoire' });
+    }
+
+    // Validation email
+    console.log('🔍 Validation email...');
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Email invalide' });
+    }
+
+    // Validation mot de passe
+    console.log('🔍 Validation mot de passe...');
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Le mot de passe doit contenir au moins 6 caractères' });
+    }
+
+    // Validation téléphone
+    console.log('🔍 Validation téléphone...');
+    const phoneRegex = /^[0-9+\s\-()]{8,15}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({ success: false, error: 'Numéro de téléphone invalide' });
+    }
+
+    // ✅ Validation spécifique pour les aidants
+    if (role === 'aidant' && aidantData) {
+      console.log('🔍 Validation données aidant...');
+      if (!aidantData.specialties || aidantData.specialties.length === 0) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Veuillez sélectionner au moins une spécialité' 
+        });
+      }
+    }
+
+    // ✅ Validation patient (uniquement pour famille)
+    if (role === 'family' && hasPatient === true) {
+      console.log('🔍 Validation patient...');
+      if (!patientData) {
+        return res.status(400).json({ success: false, error: 'Données du patient manquantes' });
+      }
+      if (!patientData.first_name) {
+        return res.status(400).json({ success: false, error: 'Prénom du patient requis' });
+      }
+      if (!patientData.last_name) {
+        return res.status(400).json({ success: false, error: 'Nom du patient requis' });
+      }
+      if (!patientData.address) {
+        return res.status(400).json({ success: false, error: 'Adresse du patient requise' });
+      }
+      if (!patientData.category) {
+        return res.status(400).json({ success: false, error: 'Catégorie du patient requise' });
+      }
+    }
+
+    // Vérifier si l'email existe déjà
+    console.log('🔍 Vérification email existant...');
+    const { data: existingUser, error: checkError } = await supabase
+      .from('profiles')
+      .select('email')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (existingUser) {
+      console.log('❌ Email déjà utilisé:', email);
+      return res.status(400).json({ success: false, error: 'Cet email est déjà utilisé' });
+    }
+
+    // =============================================
+    // CRÉATION DU COMPTE
+    // =============================================
+    
+    // 1. Créer l'utilisateur
+    console.log('🔍 Création de l\'utilisateur...');
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { 
+        full_name,
+        phone: phone || '',
+        role: role || 'family',
+      },
+    });
+
+    if (authError) {
+      console.error('❌ Erreur création auth:', authError);
+      return res.status(400).json({
+        success: false,
+        error: authError.message || 'Erreur lors de la création du compte',
+      });
+    }
+
+    console.log('✅ Utilisateur créé:', authData.user.id);
+
+    // 2. Créer le profil
+    console.log('🔍 Création du profil...');
+    
+    const isActive = role !== 'aidant';
+    
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .upsert({
+        id: authData.user.id,
+        full_name,
+        email,
+        phone: phone || null,
+        role: role || 'family',
+        patient_category: (role === 'family' && hasPatient && patientData) ? patientData.category : null,
+        is_active: isActive,
+      }, { onConflict: 'id' });
+
+    if (profileError) {
+      console.error('❌ Erreur création profil:', profileError);
+      await supabase.auth.admin.deleteUser(authData.user.id);
+      return res.status(400).json({
+        success: false,
+        error: 'Erreur lors de la création du profil',
+      });
+    }
+
+    console.log('✅ Profil créé (is_active:', isActive, ')');
+
+    // =============================================
+    // 3. Si Aidant - Créer la fiche aidant
+    // =============================================
+    if (role === 'aidant' && aidantData) {
+      console.log('🔍 Création de la fiche aidant...');
+      
+      const { data: aidant, error: aidantError } = await supabase
+        .from('aidants')
+        .insert({
+          user_id: authData.user.id,
+          specialties: aidantData.specialties || [],
+          available: false,
+          bio: aidantData.bio || null,
+          rating: 0,
+          total_missions: 0,
+          completed_missions: 0,
+          cancelled_missions: 0,
+          is_verified: false,
+          birth_date: aidantData.birth_date || null,
+          address: aidantData.address || null,
+          experience_years: aidantData.experience_years ? parseInt(aidantData.experience_years) : null,
+          zones: aidantData.zones || [],
+          languages: ['fr'],
+          status: 'pending',
+        })
+        .select()
+        .single();
+
+      if (aidantError) {
+        console.error('❌ Erreur création aidant:', aidantError);
+      } else {
+        console.log('✅ Aidant créé (en attente de validation):', aidant.id);
+      }
+    }
+
+    // =============================================
+    // 4. Si Famille - Créer le patient
+    // =============================================
+    let patient = null;
+    if (role === 'family' && hasPatient && patientData) {
+      console.log('🔍 Création du patient...');
+      const { data: patientResult, error: patientError } = await supabase
+        .from('patients')
+        .insert({
+          first_name: patientData.first_name,
+          last_name: patientData.last_name,
+          age: patientData.age ? parseInt(patientData.age) : null,
+          gender: patientData.gender || null,
+          address: patientData.address,
+          phone: patientData.phone || null,
+          emergency_contact: patientData.emergency_contact || null,
+          category: patientData.category || 'senior',
+          notes: patientData.notes || null,
+          allergies: patientData.allergies || null,
+          treatments: patientData.treatments || null,
+          created_by: authData.user.id,
+          status: 'active',
+        })
+        .select()
+        .single();
+
+      if (patientError) {
+        console.error('❌ Erreur création patient:', patientError);
+      } else {
+        patient = patientResult;
+        console.log('✅ Patient créé:', patient.id);
+        
+        await supabase
+          .from('patient_family_links')
+          .insert({
+            patient_id: patient.id,
+            family_id: authData.user.id,
+            is_primary: true,
+          });
+        console.log('✅ Lien patient-famille créé');
+      }
+    }
+
+    // =============================================
+    // 5. Créer l'inscription
+    // =============================================
+    console.log('🔍 Création de l\'inscription...');
+    
+    const inscriptionStatus = role === 'aidant' ? 'en_attente' : 'en_attente';
+    
+    await supabase
+      .from('inscriptions')
+      .insert({
+        user_id: authData.user.id,
+        patient_data: (role === 'family' && patientData) ? patientData : null,
+        offre_id: (role === 'family' && offreId) ? offreId : null,
+        status: inscriptionStatus,
+        source: 'web',
+        comments: role === 'aidant' ? 'Candidature aidant - en attente de validation' : null,
+      });
+    console.log('✅ Inscription créée avec statut:', inscriptionStatus);
+
+    // =============================================
+    // 6. Envoyer l'email
+    // =============================================
+    try {
+      console.log('🔍 Envoi email...');
+      
+      if (role === 'aidant') {
+        await sendEmail({ 
+          to: email, 
+          ...templates.aidantPending(full_name) 
+        });
+      } else {
+        await sendEmail({ 
+          to: email, 
+          ...templates.welcome(full_name) 
+        });
+      }
+      console.log('✅ Email envoyé');
+    } catch (emailError) {
+      console.error('❌ Erreur email:', emailError);
+    }
+
+    // =============================================
+    // RÉPONSE SUCCÈS
+    // =============================================
+    console.log('✅ ===== INSCRIPTION RÉUSSIE =====');
+    
+    let message = '';
+    if (role === 'aidant') {
+      message = 'Candidature envoyée avec succès ! Notre équipe examine votre dossier. Vous recevrez une notification sous 48h.';
+    } else if (hasPatient) {
+      message = 'Inscription réussie. Votre demande est en attente de validation.';
+    } else {
+      message = 'Compte créé avec succès. Votre demande est en attente de validation.';
+    }
+
+    res.status(201).json({
+      success: true,
+      message,
+      user: {
+        id: authData.user.id,
+        email: authData.user.email,
+        full_name,
+        role: role || 'family',
+        is_active: isActive,
+      },
+      patient: patient || null,
+      isAidant: role === 'aidant',
+      requiresValidation: role === 'aidant',
+    });
+
+  } catch (error) {
+    console.error('❌ ===== ERREUR INSCRIPTION =====');
+    console.error(error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Erreur lors de l\'inscription',
+    });
+  }
+});
+
+// =============================================
+// CONNEXION
+// =============================================
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    console.log('🔍 Login attempt:', email);
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email et mot de passe sont obligatoires',
+      });
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ 
+      email, 
+      password 
+    });
+
+    if (error) {
+      console.error('❌ Login error:', error);
+      return res.status(401).json({
+        success: false,
+        error: 'Email ou mot de passe incorrect',
+      });
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', data.user.id)
+      .single();
+
+    console.log('✅ Login successful:', data.user.id);
+
+    res.json({ 
+      success: true, 
+      user: data.user, 
+      profile, 
+      session: data.session 
+    });
+
+  } catch (error) {
+    console.error('❌ Login error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erreur lors de la connexion' 
+    });
+  }
+});
+
+// =============================================
+// ADMIN - TRAITER UNE INSCRIPTION (AVEC EMAIL)
+// =============================================
+router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { registrationId, status, comments } = req.body;
+    const userId = req.user.id;
+
+    console.log('🔍 Processing registration:', registrationId, '→', status);
+
+    // 1. Récupérer l'inscription
+    const { data: registration, error: regError } = await supabase
+      .from('inscriptions')
+      .select('*, user:profiles(*)')
+      .eq('id', registrationId)
+      .single();
+
+    if (regError) throw regError;
+
+    if (!registration) {
+      return res.status(404).json({ success: false, error: 'Inscription non trouvée' });
+    }
+
+    // 2. Mettre à jour l'inscription
+    const { error: updateError } = await supabase
+      .from('inscriptions')
+      .update({
+        status,
+        comments: comments || null,
+        processed_by: userId,
+        processed_at: new Date().toISOString(),
+      })
+      .eq('id', registrationId);
+
+    if (updateError) throw updateError;
+
+    // 3. Si validée, activer le compte
+    if (status === 'validee') {
+      await supabase
+        .from('profiles')
+        .update({ is_active: true })
+        .eq('id', registration.user_id);
+
+      // Si c'est un aidant, le marquer comme approuvé
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('id')
+        .eq('user_id', registration.user_id)
+        .single();
+
+      if (aidant) {
+        await supabase
+          .from('aidants')
+          .update({ 
+            status: 'approved',
+            is_verified: true,
+            available: true 
+          })
+          .eq('id', aidant.id);
+      }
+    }
+
+    // 4. ENVOYER L'EMAIL
+    const user = registration.user;
+    if (user?.email) {
+      try {
+        if (status === 'validee') {
+          await sendEmail({
+            to: user.email,
+            ...templates.registrationValidated({ name: user.full_name }),
+          });
+        } else {
+          await sendEmail({
+            to: user.email,
+            subject: '❌ Candidature Santé Plus - Information',
+            htmlContent: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f0e8; border-radius: 16px;">
+                <div style="background: #1a4a3a; padding: 30px; border-radius: 12px; text-align: center;">
+                  <h1 style="color: #c9a84c; margin: 0;">Santé Plus</h1>
+                  <p style="color: white; margin: 5px 0;">Services</p>
+                </div>
+                <div style="background: white; padding: 30px; border-radius: 12px; margin-top: 20px;">
+                  <h2 style="color: #1a4a3a;">Bonjour ${user.full_name},</h2>
+                  <p>Nous vous remercions pour l'intérêt que vous avez porté à Santé Plus Services.</p>
+                  <p>Après examen de votre candidature, nous ne pouvons pas donner suite à votre demande pour le moment.</p>
+                  ${comments ? `<p style="color: #666; font-size: 14px;">Motif : ${comments}</p>` : ''}
+                  <p style="color: #666; font-size: 14px;">Nous vous souhaitons une bonne continuation.</p>
+                  <p style="color: #666; font-size: 14px;">L'équipe Santé Plus Services</p>
+                </div>
+              </div>
+            `,
+          });
+        }
+        console.log('✅ Email envoyé à:', user.email);
+      } catch (emailError) {
+        console.error('❌ Erreur envoi email:', emailError);
+      }
+    }
+
+    // 5. Notification
+    await supabase.from('notifications').insert({
+      user_id: registration.user_id,
+      title: status === 'validee' ? '✅ Inscription validée' : '❌ Inscription refusée',
+      body: status === 'validee'
+        ? `Votre inscription a été validée. Bienvenue chez Santé Plus Services !`
+        : `Votre inscription a été refusée. ${comments || 'Contactez-nous pour plus d\'informations.'}`,
+      type: 'system',
+      data: { registration_id: registrationId, status },
+    });
+
+    res.json({ success: true, message: 'Inscription traitée avec succès' });
+  } catch (error) {
+    console.error('❌ Process registration error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// MOT DE PASSE OUBLIÉ
+// =============================================
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email est obligatoire',
+      });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('profiles')
+      .select('full_name, email')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Aucun compte trouvé avec cet email' 
+      });
+    }
+
+    const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${process.env.CLIENT_URL}/reset-password`,
+    });
+
+    if (error) {
+      console.error('❌ Reset password error:', error);
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Erreur lors de l\'envoi',
+      });
+    }
+
+    const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${data?.access_token || ''}`;
+    
+    try {
+      await sendEmail({ 
+        to: email, 
+        ...templates.forgotPassword(user.full_name, resetLink) 
+      });
+    } catch (emailError) {
+      console.error('❌ Email sending error:', emailError);
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Un email de réinitialisation a été envoyé' 
+    });
+
+  } catch (error) {
+    console.error('❌ Forgot password error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erreur lors du traitement' 
+    });
+  }
+});
+
+// =============================================
+// RÉINITIALISATION MOT DE PASSE
+// =============================================
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Token et mot de passe sont obligatoires',
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le mot de passe doit contenir au moins 6 caractères',
+      });
+    }
+
+    const { error } = await supabase.auth.updateUser(password);
+    
+    if (error) {
+      console.error('❌ Reset password error:', error);
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Erreur lors de la réinitialisation',
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Mot de passe réinitialisé avec succès' 
+    });
+
+  } catch (error) {
+    console.error('❌ Reset password error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erreur lors de la réinitialisation' 
+    });
+  }
+});
+
+// =============================================
+// UTILISATEUR ACTUEL
+// =============================================
+router.get('/me', authMiddleware, async (req, res) => {
+  try {
+    res.json({ 
+      success: true,
+      user: req.user, 
+      profile: req.profile 
+    });
+  } catch (error) {
+    console.error('❌ Get me error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erreur lors du chargement du profil' 
+    });
+  }
+});
+
+// =============================================
+// CHANGER DE RÔLE
+// =============================================
+router.post('/switch-role', authMiddleware, async (req, res) => {
+  try {
+    const { role } = req.body;
+    const { id } = req.user;
+
+    if (!role) {
+      return res.status(400).json({
+        success: false,
+        error: 'Rôle est obligatoire',
+      });
+    }
+
+    const allowedRoles = ['family', 'aidant', 'coordinator'];
+    if (role === 'admin' && req.profile.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false,
+        error: 'Non autorisé à passer en admin' 
+      });
+    }
+
+    if (!allowedRoles.includes(role) && role !== 'admin') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Rôle invalide' 
+      });
+    }
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ role })
+      .eq('id', id);
+
+    if (error) {
+      console.error('❌ Switch role error:', error);
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Erreur lors du changement de rôle',
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Rôle mis à jour', 
+      role 
+    });
+
+  } catch (error) {
+    console.error('❌ Switch role error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erreur lors du changement de rôle' 
+    });
+  }
+});
+
+// =============================================
+// AJOUTER UN PATIENT
+// =============================================
+router.post('/add-patient', authMiddleware, async (req, res) => {
+  try {
+    const { patientData, offreId } = req.body;
+    const userId = req.user.id;
+
+    if (!patientData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Données du patient requises',
+      });
+    }
+
+    if (!patientData.first_name || !patientData.last_name || !patientData.address) {
+      return res.status(400).json({
+        success: false,
+        error: 'Prénom, nom et adresse sont obligatoires',
+      });
+    }
+
+    const { data: patient, error: patientError } = await supabase
+      .from('patients')
+      .insert({
+        first_name: patientData.first_name,
+        last_name: patientData.last_name,
+        age: patientData.age ? parseInt(patientData.age) : null,
+        gender: patientData.gender || null,
+        address: patientData.address,
+        phone: patientData.phone || null,
+        emergency_contact: patientData.emergency_contact || null,
+        category: patientData.category || 'senior',
+        notes: patientData.notes || null,
+        allergies: patientData.allergies || null,
+        treatments: patientData.treatments || null,
+        created_by: userId,
+      })
+      .select()
+      .single();
+
+    if (patientError) {
+      console.error('❌ Patient creation error:', patientError);
+      return res.status(400).json({
+        success: false,
+        error: patientError.message || 'Erreur lors de la création du patient',
+      });
+    }
+
+    await supabase
+      .from('patient_family_links')
+      .insert({
+        patient_id: patient.id,
+        family_id: userId,
+        is_primary: true,
+      });
+
+    await supabase
+      .from('profiles')
+      .update({ 
+        patient_category: patientData.category || 'senior' 
+      })
+      .eq('id', userId);
+
+    res.json({ 
+      success: true, 
+      message: 'Patient ajouté avec succès', 
+      patient 
+    });
+
+  } catch (error) {
+    console.error('❌ Add patient error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Erreur lors de l\'ajout du patient' 
+    });
+  }
+});
+
+// =============================================
+// SUPPRIMER LE COMPTE (avec droits admin)
+// =============================================
+router.post('/delete-account', authMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const { user } = req;
+
+    if (userId !== user.id && req.profile.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à supprimer ce compte',
+      });
+    }
+
+    const { error } = await supabase.auth.admin.deleteUser(userId);
+
+    if (error) {
+      console.error('❌ Erreur suppression utilisateur:', error);
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Erreur lors de la suppression',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Compte supprimé avec succès',
+    });
+  } catch (error) {
+    console.error('❌ Delete account error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la suppression',
+    });
+  }
+});
+
+// =============================================
+// ADMIN - APPROUVER UN AIDANT
+// =============================================
+router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
+  try {
+    const { aidantId, comments } = req.body;
+    const { user, profile } = req;
+
+    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à approuver des aidants',
+      });
+    }
+
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('*, user:profiles(*)')
+      .eq('id', aidantId)
+      .single();
+
+    if (aidantError || !aidant) {
+      console.error('❌ Erreur récupération aidant:', aidantError);
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé',
+      });
+    }
+
+    await supabase
+      .from('profiles')
+      .update({ 
+        is_active: true,
+        role: 'aidant',
+      })
+      .eq('id', aidant.user_id);
+
+    await supabase
+      .from('aidants')
+      .update({ 
+        is_verified: true,
+        available: true,
+        status: 'approved',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', aidantId);
+
+    await supabase
+      .from('inscriptions')
+      .update({ 
+        status: 'validee',
+        comments: comments || 'Candidature aidant approuvée',
+        processed_by: user.id,
+        processed_at: new Date().toISOString(),
+      })
+      .eq('user_id', aidant.user_id);
+
+    await supabase
+      .from('notifications')
+      .insert({
+        user_id: aidant.user_id,
+        title: '✅ Compte aidant validé !',
+        body: `Félicitations ${aidant.user?.full_name || 'Aidant'} ! Votre compte a été validé. Vous pouvez maintenant accepter des missions et commencer à travailler.`,
+        type: 'system',
+        is_read: false,
+      });
+
+    try {
+      await sendEmail({ 
+        to: aidant.user?.email, 
+        ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
+      });
+    } catch (emailError) {
+      console.error('❌ Erreur envoi email:', emailError);
+    }
+
+    console.log('✅ Aidant approuvé:', aidantId);
+    res.json({
+      success: true,
+      message: 'Aidant approuvé avec succès',
+    });
+
+  } catch (error) {
+    console.error('❌ Approve aidant error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de l\'approbation',
+    });
+  }
+});
+
+// =============================================
+// ADMIN - REFUSER UN AIDANT
+// =============================================
+router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
+  try {
+    const { aidantId, comments } = req.body;
+    const { user, profile } = req;
+
+    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à refuser des aidants',
+      });
+    }
+
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('*, user:profiles(*)')
+      .eq('id', aidantId)
+      .single();
+
+    if (aidantError || !aidant) {
+      console.error('❌ Erreur récupération aidant:', aidantError);
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé',
+      });
+    }
+
+    await supabase
+      .from('aidants')
+      .update({ 
+        is_verified: false,
+        status: 'rejected',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', aidantId);
+
+    await supabase
+      .from('inscriptions')
+      .update({ 
+        status: 'refusee',
+        comments: comments || 'Candidature aidant refusée',
+        processed_by: user.id,
+        processed_at: new Date().toISOString(),
+      })
+      .eq('user_id', aidant.user_id);
+
+    await supabase
+      .from('notifications')
+      .insert({
+        user_id: aidant.user_id,
+        title: '❌ Candidature non retenue',
+        body: `Bonjour ${aidant.user?.full_name || 'Aidant'}, nous vous remercions pour votre intérêt. Votre candidature n'a pas été retenue pour le moment.`,
+        type: 'system',
+        is_read: false,
+      });
+
+    try {
+      await sendEmail({ 
+        to: aidant.user?.email, 
+        ...templates.aidantRejected(aidant.user?.full_name || 'Aidant') 
+      });
+    } catch (emailError) {
+      console.error('❌ Erreur envoi email:', emailError);
+    }
+
+    console.log('✅ Aidant refusé:', aidantId);
+    res.json({
+      success: true,
+      message: 'Aidant refusé',
+    });
+
+  } catch (error) {
+    console.error('❌ Reject aidant error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors du refus',
+    });
+  }
+});
+
+module.exports = router;
