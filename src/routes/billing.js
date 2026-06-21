@@ -99,6 +99,7 @@ router.post('/generate-payment', async (req, res) => {
     } = req.body;
 
     console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
+    console.log('📥 abonnement_id reçu:', abonnement_id);
     console.log('📥 order_data reçu:', order_data);
 
     const finalAmount = Number(montant || amount || 0);
@@ -147,6 +148,7 @@ router.post('/generate-payment', async (req, res) => {
       email: finalEmail,
       description: description || 'Abonnement Santé Plus',
       is_ponctual: is_ponctual || false,
+      abonnement_id: abonnement_id || null,
     });
 
     // ============================================================
@@ -220,6 +222,7 @@ router.post('/generate-payment', async (req, res) => {
       user_id: user.id,
       amount: finalAmount,
       is_ponctual: is_ponctual,
+      abonnement_id: abonnement_id || null,
     });
 
     const { data: payment, error: dbError } = await supabase
@@ -334,10 +337,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - Version corrigée
-// ============================================================
-// ============================================================
-// 🔔 WEBHOOK FEDAPAY - Version complète pour abonnements et ponctuels
+// 🔔 WEBHOOK FEDAPAY - Version complète (abonnements + ponctuels)
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
@@ -459,7 +459,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           } else {
             console.log('✅ Abonnement activé:', subscriptionId);
             
-            // ✅ Notification d'activation
             await supabase.from('notifications').insert({
               user_id: newPayment.user_id,
               title: '✅ Abonnement activé !',
@@ -538,7 +537,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         } else {
           console.log('✅ Abonnement activé:', subscriptionId);
           
-          // ✅ Notification d'activation
           await supabase.from('notifications').insert({
             user_id: payment.user_id,
             title: '✅ Abonnement activé !',
@@ -588,9 +586,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     });
   }
 });
-// ============================================================
-// 🔧 FONCTION HELPER - Créer une commande ponctuelle
-// ============================================================
+
 // ============================================================
 // 🔧 FONCTION HELPER - Créer une commande ponctuelle
 // ============================================================
@@ -602,7 +598,7 @@ async function createPonctualOrder(payment, metadata, transactionId) {
     console.log('📦 orderData:', orderData);
     console.log('📦 payment.user_id:', payment.user_id);
 
-    // ✅ Vérifier si une commande existe déjà pour CETTE transaction (éviter les doublons de webhook)
+    // ✅ Vérifier si une commande existe déjà pour cette transaction (éviter les doublons de webhook)
     const { data: existingOrders } = await supabase
       .from('commandes')
       .select('id')
@@ -617,7 +613,7 @@ async function createPonctualOrder(payment, metadata, transactionId) {
       return;
     }
 
-    // ✅ Créer la commande (même contenu autorisé plusieurs fois)
+    // ✅ Créer la commande
     const { data: order, error: orderError } = await supabase
       .from('commandes')
       .insert({
