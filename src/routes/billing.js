@@ -334,7 +334,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - Version complète
+// 🔔 WEBHOOK FEDAPAY - Version avec transaction.approved
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
@@ -359,13 +359,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       });
     }
 
-    // ✅ Accepter les deux noms d'événement
+    // ✅ Accepter transaction.approved (et transaction.paid pour compatibilité)
     if (event === 'transaction.approved' || event === 'transaction.paid') {
       const transactionId = data.id;
       const metadata = data.metadata || {};
 
-      console.log('💰 Transaction:', transactionId);
-      console.log('📦 Métadonnées:', metadata);
+      console.log('💰 Transaction approuvée:', transactionId);
+      console.log('📦 Métadonnées reçues:', metadata);
 
       // ✅ 1. RECHERCHER LE PAIEMENT
       const { data: payment, error: findError } = await supabase
@@ -382,8 +382,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           details: findError.message,
         });
       }
-
-      let paymentId = null;
 
       // ✅ 2. SI LE PAIEMENT N'EXISTE PAS - Le créer
       if (!payment) {
@@ -420,7 +418,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         }
 
         console.log('✅ Paiement créé depuis le webhook:', newPayment.id);
-        paymentId = newPayment.id;
 
         // ✅ 3. CRÉER LA COMMANDE SI PONCTUELLE
         if (metadata.is_ponctual) {
@@ -454,7 +451,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
       // ✅ 6. SI LE PAIEMENT EXISTE - Le mettre à jour
       console.log('✅ Paiement trouvé:', payment.id);
-      paymentId = payment.id;
 
       const { data: updatedPayment, error: updateError } = await supabase
         .from('paiements')
