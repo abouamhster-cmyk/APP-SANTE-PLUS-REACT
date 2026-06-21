@@ -28,7 +28,10 @@ app.use(helmet());
 app.set('trust proxy', true);
 
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: [
+    'http://localhost:5173',
+    'https://app-sante-plus-react-front.vercel.app'
+  ],
   credentials: true,
 }));
 
