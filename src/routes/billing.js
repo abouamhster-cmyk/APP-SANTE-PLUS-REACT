@@ -534,6 +534,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 // ============================================================
 // 🔧 FONCTION HELPER - Créer une commande ponctuelle
 // ============================================================
+// ============================================================
+// 🔧 FONCTION HELPER - Créer une commande ponctuelle
+// ============================================================
 async function createPonctualOrder(payment, metadata, transactionId) {
   try {
     const orderData = payment.metadata?.order_data || metadata?.order_data || {};
@@ -542,22 +545,22 @@ async function createPonctualOrder(payment, metadata, transactionId) {
     console.log('📦 orderData:', orderData);
     console.log('📦 payment.user_id:', payment.user_id);
 
-    // Vérifier les doublons
+    // ✅ Vérifier si une commande existe déjà pour CETTE transaction (éviter les doublons de webhook)
     const { data: existingOrders } = await supabase
       .from('commandes')
       .select('id')
       .eq('family_id', payment.user_id)
-      .eq('description', orderData.description || 'Commande ponctuelle')
       .eq('order_type', 'ponctual')
       .eq('is_paid', true)
-      .order('created_at', { ascending: false })
+      .eq('metadata->>transaction_id', String(transactionId))
       .limit(1);
 
     if (existingOrders && existingOrders.length > 0) {
-      console.log('ℹ️ Commande déjà créée, skip...');
+      console.log('ℹ️ Commande déjà créée pour cette transaction:', transactionId);
       return;
     }
 
+    // ✅ Créer la commande (même contenu autorisé plusieurs fois)
     const { data: order, error: orderError } = await supabase
       .from('commandes')
       .insert({
@@ -590,14 +593,20 @@ async function createPonctualOrder(payment, metadata, transactionId) {
 
     console.log('✅ Commande ponctuelle créée:', order.id);
 
-    // Notification
+    // ✅ NOTIFICATION DE CONFIRMATION
     await supabase.from('notifications').insert({
       user_id: payment.user_id,
-      title: '✅ Commande créée',
-      body: `Votre commande ponctuelle a été créée avec succès.`,
+      title: '✅ Commande confirmée !',
+      body: `Votre commande "${orderData.description || 'Commande ponctuelle'}" a été enregistrée avec succès. Vous serez notifié de son avancement.`,
       type: 'commande',
-      data: { order_id: order.id },
+      data: { 
+        order_id: order.id,
+        status: 'creee',
+        message: 'Commande créée avec succès'
+      },
     });
+
+    console.log('📧 Notification envoyée à l\'utilisateur:', payment.user_id);
 
   } catch (error) {
     console.error('❌ Erreur createPonctualOrder:', error);
