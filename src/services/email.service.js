@@ -221,46 +221,31 @@ const templates = {
       <body>
         <div class="container">
           <div class="card">
-            <!-- Header -->
             <div class="header">
               <div class="logo-container">
                 <div class="logo-text">Santé Plus</div>
                 <div class="logo-sub">Services</div>
               </div>
             </div>
-
-            <!-- Content -->
             <h1 class="title">🔐 Code de vérification</h1>
             <p class="subtitle">Bonjour,</p>
             <p class="subtitle" style="margin-top: 8px;">
               Vous avez demandé à créer un compte administrateur pour <strong>Santé Plus Services</strong>.
             </p>
-
-            <!-- OTP Box -->
             <div class="otp-box">
               <div class="otp-label">Votre code de vérification est :</div>
               <div class="otp-code">${otp}</div>
               <div class="otp-expiry">⏱️ Ce code expire dans ${expiresIn} minutes</div>
             </div>
-
             <p style="color: #6b7280; font-size: 14px; margin-top: 16px;">
               Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.
             </p>
-
             <hr class="divider">
-
-            <!-- Footer -->
             <div class="footer">
               <p class="footer-text">
                 <strong>Santé Plus Services</strong><br>
-                Accompagnement humain et coordination à domicile<br>
-                <span style="font-size: 11px;">
-                  Cotonou, Bénin<br>
-                  📧 contact@santeplus.bj | 📞 +229 01 91 34 34 58
-                </span>
-              </p>
-              <p class="footer-text" style="margin-top: 12px; font-size: 11px;">
-                © ${new Date().getFullYear()} Santé Plus Services. Tous droits réservés.
+                Cotonou, Bénin<br>
+                📧 contact@santeplus.bj | 📞 +229 01 91 34 34 58
               </p>
             </div>
           </div>
@@ -303,6 +288,59 @@ const templates = {
                 Accéder à mon compte
               </a>
             </div>
+            <hr class="divider">
+            <div class="footer">
+              <p class="footer-text">
+                <strong>Santé Plus Services</strong><br>
+                Cotonou, Bénin<br>
+                📧 contact@santeplus.bj | 📞 +229 01 91 34 34 58
+              </p>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // =============================================
+  // AIDANT - CANDIDATURE EN ATTENTE (NOUVEAU)
+  // =============================================
+  aidantPending: (name) => ({
+    subject: '📋 Candidature aidant - En attente de validation',
+    htmlContent: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Candidature en attente</title>
+        <style>${emailStyles}</style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="card">
+            <div class="header">
+              <div class="logo-container">
+                <div class="logo-text">Santé Plus</div>
+                <div class="logo-sub">Services</div>
+              </div>
+            </div>
+            <h1 class="title">📋 Votre candidature a été reçue</h1>
+            <p class="subtitle">Bonjour ${name},</p>
+            <p style="color: #4b5563; font-size: 15px; line-height: 1.6; margin-top: 16px;">
+              Nous avons bien reçu votre candidature pour rejoindre l'équipe <strong>Santé Plus Services</strong> en tant qu'aidant.
+            </p>
+            <p style="color: #4b5563; font-size: 15px; line-height: 1.6; margin-top: 8px;">
+              Notre équipe examine votre dossier dans les plus brefs délais. Vous recevrez une notification par email dès que votre compte sera validé.
+            </p>
+            <div style="background: #f5f0e8; border-radius: 12px; padding: 16px; margin: 20px 0;">
+              <p style="margin: 4px 0; color: #4b5563;">⏳ Délai de traitement : <strong>48h maximum</strong></p>
+              <p style="margin: 4px 0; color: #4b5563;">📧 Une notification vous sera envoyée</p>
+            </div>
+            <p style="color: #9ca3af; font-size: 13px; text-align: center;">
+              En attendant, vous pouvez consulter votre espace pour suivre l'avancement de votre candidature.
+            </p>
             <hr class="divider">
             <div class="footer">
               <p class="footer-text">
@@ -601,6 +639,54 @@ const templates = {
             <div class="footer">
               <p class="footer-text">
                 L'équipe Santé Plus Services
+              </p>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  }),
+
+  // =============================================
+  // INSCRIPTION VALIDÉE (pour famille)
+  // =============================================
+  registrationValidated: (data) => ({
+    subject: '✅ Votre inscription est validée !',
+    htmlContent: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Inscription validée</title>
+        <style>${emailStyles}</style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="card">
+            <div class="header">
+              <div class="logo-container">
+                <div class="logo-text">Santé Plus</div>
+                <div class="logo-sub">Services</div>
+              </div>
+            </div>
+            <h1 class="title">✅ Inscription validée !</h1>
+            <p class="subtitle">Bonjour ${data.name || ''},</p>
+            <p style="color: #4b5563; font-size: 15px; line-height: 1.6; margin-top: 16px;">
+              Nous avons le plaisir de vous informer que votre inscription a été <strong>validée</strong>.
+              Vous pouvez dès maintenant accéder à tous nos services.
+            </p>
+            <div style="text-align: center; margin: 24px 0;">
+              <a href="${process.env.CLIENT_URL || 'https://sante-plus-services.com'}/login" class="btn">
+                Se connecter
+              </a>
+            </div>
+            <hr class="divider">
+            <div class="footer">
+              <p class="footer-text">
+                <strong>Santé Plus Services</strong><br>
+                Cotonou, Bénin
               </p>
             </div>
           </div>
