@@ -74,6 +74,8 @@ const assessmentRoutes = require('./src/routes/assessment.routes');
 const contractRoutes = require('./src/routes/contract.routes');
 const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
+const offerRoutes = require('./src/routes/offers.routes');
+
 
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
@@ -89,6 +91,8 @@ app.use('/api/assessment', assessmentRoutes);
 app.use('/api/contract', contractRoutes);
 app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/offers', offerRoutes);
+
 
 // =============================================
 // HEALTH CHECK
