@@ -1,4 +1,5 @@
 // 📁 backend/src/routes/auth.routes.js
+// VERSION PRODUCTION - AVEC RETRY ET LOGS COMPLETS
 
 const express = require('express');
 const router = express.Router();
@@ -6,6 +7,58 @@ const { supabase } = require('../services/supabase.service');
 const { sendEmail, templates } = require('../services/email.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
+
+// ============================================================
+// CONSTANTES
+// ============================================================
+const MAX_EMAIL_RETRY = 3;
+const EMAIL_RETRY_DELAY = 2000;
+
+// ============================================================
+// 🔧 FONCTION HELPER - ENVOI EMAIL AVEC RETRY
+// ============================================================
+async function sendEmailWithRetry(emailData, retryCount = 0) {
+  const maxRetries = MAX_EMAIL_RETRY;
+  const delay = EMAIL_RETRY_DELAY;
+
+  try {
+    console.log(`📧 Tentative ${retryCount + 1}/${maxRetries} - Envoi email à:`, emailData.to);
+    const result = await sendEmail(emailData);
+    console.log('✅ Email envoyé avec succès');
+    return { success: true, result };
+  } catch (error) {
+    console.error(`❌ Échec envoi email (tentative ${retryCount + 1}):`, error.message);
+
+    if (retryCount < maxRetries - 1) {
+      console.log(`⏳ Nouvelle tentative dans ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return sendEmailWithRetry(emailData, retryCount + 1);
+    }
+
+    console.error(`❌ Échec définitif après ${maxRetries} tentatives`);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================
+// 🔧 FONCTION HELPER - ENVOI EMAIL AVEC LOG
+// ============================================================
+async function sendEmailWithLog(emailData, context) {
+  const startTime = Date.now();
+  console.log(`📧 [${context}] Envoi email à:`, emailData.to);
+  console.log(`📧 [${context}] Sujet:`, emailData.subject);
+
+  const result = await sendEmailWithRetry(emailData);
+
+  const duration = Date.now() - startTime;
+  if (result.success) {
+    console.log(`✅ [${context}] Email envoyé en ${duration}ms`);
+  } else {
+    console.error(`❌ [${context}] Échec après ${duration}ms:`, result.error);
+  }
+
+  return result;
+}
 
 // =============================================
 // INSCRIPTION - Version avec support Aidant
@@ -261,25 +314,41 @@ router.post('/register', async (req, res) => {
     console.log('✅ Inscription créée avec statut:', inscriptionStatus);
 
     // =============================================
-    // 6. Envoyer l'email
+    // 6. ENVOI EMAIL AVEC RETRY
     // =============================================
+    let emailSent = false;
+    let emailError = null;
+
     try {
       console.log('🔍 Envoi email...');
       
+      let emailData;
       if (role === 'aidant') {
-        await sendEmail({ 
+        emailData = { 
           to: email, 
           ...templates.aidantPending(full_name) 
-        });
+        };
       } else {
-        await sendEmail({ 
+        emailData = { 
           to: email, 
           ...templates.welcome(full_name) 
-        });
+        };
       }
-      console.log('✅ Email envoyé');
+
+      const result = await sendEmailWithLog(emailData, 'REGISTER');
+      emailSent = result.success;
+      emailError = result.success ? null : result.error;
+
+      if (emailSent) {
+        console.log('✅ Email envoyé avec succès');
+      } else {
+        console.warn('⚠️ Email non envoyé mais inscription réussie');
+      }
+
     } catch (emailError) {
       console.error('❌ Erreur email:', emailError);
+      emailSent = false;
+      emailError = emailError.message;
     }
 
     // =============================================
@@ -296,9 +365,16 @@ router.post('/register', async (req, res) => {
       message = 'Compte créé avec succès. Votre demande est en attente de validation.';
     }
 
+    // Ajouter un avertissement si l'email a échoué
+    if (!emailSent) {
+      message += ' (⚠️ L\'email de confirmation n\'a pas pu être envoyé, mais votre compte est bien créé)';
+    }
+
     res.status(201).json({
       success: true,
       message,
+      email_sent: emailSent,
+      email_error: emailError,
       user: {
         id: authData.user.id,
         email: authData.user.email,
@@ -375,14 +451,18 @@ router.post('/login', async (req, res) => {
 });
 
 // =============================================
-// ADMIN - TRAITER UNE INSCRIPTION (AVEC EMAIL)
+// ADMIN - TRAITER UNE INSCRIPTION (AVEC EMAIL ET RETRY)
 // =============================================
 router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  const startTime = Date.now();
+  let emailSent = false;
+  let emailError = null;
+
   try {
     const { registrationId, status, comments } = req.body;
     const userId = req.user.id;
 
-    console.log('🔍 Processing registration:', registrationId, '→', status);
+    console.log(`🔍 [PROCESS] Traitement inscription ${registrationId} → ${status}`);
 
     // 1. Récupérer l'inscription
     const { data: registration, error: regError } = await supabase
@@ -396,6 +476,8 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
     if (!registration) {
       return res.status(404).json({ success: false, error: 'Inscription non trouvée' });
     }
+
+    console.log(`👤 Inscription pour: ${registration.user?.full_name} (${registration.user?.email})`);
 
     // 2. Mettre à jour l'inscription
     const { error: updateError } = await supabase
@@ -412,6 +494,7 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
 
     // 3. Si validée, activer le compte
     if (status === 'validee') {
+      console.log('🔍 Activation du compte...');
       await supabase
         .from('profiles')
         .update({ is_active: true })
@@ -433,43 +516,52 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
             available: true 
           })
           .eq('id', aidant.id);
+        console.log('✅ Aidant approuvé:', aidant.id);
       }
     }
 
-    // 4. ENVOYER L'EMAIL
+    // 4. ENVOYER L'EMAIL AVEC RETRY
     const user = registration.user;
     if (user?.email) {
-      try {
-        if (status === 'validee') {
-          await sendEmail({
-            to: user.email,
-            ...templates.registrationValidated({ name: user.full_name }),
-          });
-        } else {
-          await sendEmail({
-            to: user.email,
-            subject: '❌ Candidature Santé Plus - Information',
-            htmlContent: `
-              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f0e8; border-radius: 16px;">
-                <div style="background: #1a4a3a; padding: 30px; border-radius: 12px; text-align: center;">
-                  <h1 style="color: #c9a84c; margin: 0;">Santé Plus</h1>
-                  <p style="color: white; margin: 5px 0;">Services</p>
-                </div>
-                <div style="background: white; padding: 30px; border-radius: 12px; margin-top: 20px;">
-                  <h2 style="color: #1a4a3a;">Bonjour ${user.full_name},</h2>
-                  <p>Nous vous remercions pour l'intérêt que vous avez porté à Santé Plus Services.</p>
-                  <p>Après examen de votre candidature, nous ne pouvons pas donner suite à votre demande pour le moment.</p>
-                  ${comments ? `<p style="color: #666; font-size: 14px;">Motif : ${comments}</p>` : ''}
-                  <p style="color: #666; font-size: 14px;">Nous vous souhaitons une bonne continuation.</p>
-                  <p style="color: #666; font-size: 14px;">L'équipe Santé Plus Services</p>
-                </div>
+      console.log(`📧 Envoi email de ${status === 'validee' ? 'validation' : 'refus'}...`);
+
+      let emailData;
+      if (status === 'validee') {
+        emailData = {
+          to: user.email,
+          ...templates.registrationValidated({ name: user.full_name }),
+        };
+      } else {
+        emailData = {
+          to: user.email,
+          subject: '❌ Candidature Santé Plus - Information',
+          htmlContent: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f0e8; border-radius: 16px;">
+              <div style="background: #1a4a3a; padding: 30px; border-radius: 12px; text-align: center;">
+                <h1 style="color: #c9a84c; margin: 0;">Santé Plus</h1>
+                <p style="color: white; margin: 5px 0;">Services</p>
               </div>
-            `,
-          });
-        }
-        console.log('✅ Email envoyé à:', user.email);
-      } catch (emailError) {
-        console.error('❌ Erreur envoi email:', emailError);
+              <div style="background: white; padding: 30px; border-radius: 12px; margin-top: 20px;">
+                <h2 style="color: #1a4a3a;">Bonjour ${user.full_name},</h2>
+                <p>Nous vous remercions pour l'intérêt que vous avez porté à Santé Plus Services.</p>
+                <p>Après examen de votre candidature, nous ne pouvons pas donner suite à votre demande pour le moment.</p>
+                ${comments ? `<p style="color: #666; font-size: 14px;">Motif : ${comments}</p>` : ''}
+                <p style="color: #666; font-size: 14px;">Nous vous souhaitons une bonne continuation.</p>
+                <p style="color: #666; font-size: 14px;">L'équipe Santé Plus Services</p>
+              </div>
+            </div>
+          `,
+        };
+      }
+
+      const emailResult = await sendEmailWithLog(emailData, `PROCESS_${status.toUpperCase()}`);
+      emailSent = emailResult.success;
+      emailError = emailResult.success ? null : emailResult.error;
+
+      if (emailSent) {
+        console.log(`✅ Email ${status === 'validee' ? 'de validation' : 'de refus'} envoyé`);
+      } else {
+        console.warn(`⚠️ Email ${status === 'validee' ? 'de validation' : 'de refus'} non envoyé`);
       }
     }
 
@@ -484,10 +576,29 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
       data: { registration_id: registrationId, status },
     });
 
-    res.json({ success: true, message: 'Inscription traitée avec succès' });
+    const duration = Date.now() - startTime;
+    console.log(`✅ [PROCESS] Inscription traitée en ${duration}ms - Email: ${emailSent ? '✅' : '❌'}`);
+
+    res.json({
+      success: true,
+      message: emailSent 
+        ? 'Inscription traitée avec succès. Un email a été envoyé.'
+        : 'Inscription traitée avec succès. (⚠️ L\'email n\'a pas pu être envoyé)',
+      email_sent: emailSent,
+      email_error: emailError,
+      registration_id: registrationId,
+      status,
+    });
+
   } catch (error) {
-    console.error('❌ Process registration error:', error);
-    res.status(500).json({ error: error.message });
+    const duration = Date.now() - startTime;
+    console.error(`❌ [PROCESS] Erreur après ${duration}ms:`, error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors du traitement',
+      email_sent: emailSent,
+      email_error: emailError || error.message,
+    });
   }
 });
 
@@ -532,11 +643,12 @@ router.post('/forgot-password', async (req, res) => {
 
     const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${data?.access_token || ''}`;
     
+    // ✅ Envoi email avec retry
     try {
-      await sendEmail({ 
+      await sendEmailWithLog({ 
         to: email, 
         ...templates.forgotPassword(user.full_name, resetLink) 
-      });
+      }, 'FORGOT_PASSWORD');
     } catch (emailError) {
       console.error('❌ Email sending error:', emailError);
     }
@@ -795,9 +907,13 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
 });
 
 // =============================================
-// ADMIN - APPROUVER UN AIDANT
+// ADMIN - APPROUVER UN AIDANT AVEC EMAIL ET RETRY
 // =============================================
 router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  let emailSent = false;
+  let emailError = null;
+
   try {
     const { aidantId, comments } = req.body;
     const { user, profile } = req;
@@ -809,6 +925,9 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       });
     }
 
+    console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
+
+    // 1. Récupérer l'aidant avec son profil
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*, user:profiles(*)')
@@ -823,7 +942,10 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       });
     }
 
-    await supabase
+    console.log(`👤 Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
+
+    // 2. Mettre à jour le profil
+    const { error: profileUpdateError } = await supabase
       .from('profiles')
       .update({ 
         is_active: true,
@@ -831,7 +953,16 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       })
       .eq('id', aidant.user_id);
 
-    await supabase
+    if (profileUpdateError) {
+      console.error('❌ Erreur mise à jour profil:', profileUpdateError);
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur lors de la mise à jour du profil',
+      });
+    }
+
+    // 3. Mettre à jour l'aidant
+    const { error: aidantUpdateError } = await supabase
       .from('aidants')
       .update({ 
         is_verified: true,
@@ -841,6 +972,15 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       })
       .eq('id', aidantId);
 
+    if (aidantUpdateError) {
+      console.error('❌ Erreur mise à jour aidant:', aidantUpdateError);
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur lors de la mise à jour de l\'aidant',
+      });
+    }
+
+    // 4. Mettre à jour l'inscription
     await supabase
       .from('inscriptions')
       .update({ 
@@ -851,44 +991,61 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       })
       .eq('user_id', aidant.user_id);
 
-    await supabase
-      .from('notifications')
-      .insert({
-        user_id: aidant.user_id,
-        title: '✅ Compte aidant validé !',
-        body: `Félicitations ${aidant.user?.full_name || 'Aidant'} ! Votre compte a été validé. Vous pouvez maintenant accepter des missions et commencer à travailler.`,
-        type: 'system',
-        is_read: false,
-      });
+    // 5. Notification
+    await supabase.from('notifications').insert({
+      user_id: aidant.user_id,
+      title: '✅ Compte aidant validé !',
+      body: `Félicitations ${aidant.user?.full_name || 'Aidant'} ! Votre compte a été validé. Vous pouvez maintenant accepter des missions et commencer à travailler.`,
+      type: 'system',
+      is_read: false,
+    });
 
-    try {
-      await sendEmail({ 
+    // 6. ✅ ENVOYER L'EMAIL D'APPROBATION AVEC RETRY
+    console.log('📧 Envoi email d\'approbation...');
+    const emailResult = await sendEmailWithLog(
+      { 
         to: aidant.user?.email, 
         ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
-      });
-    } catch (emailError) {
-      console.error('❌ Erreur envoi email:', emailError);
-    }
+      },
+      'APPROVE'
+    );
 
-    console.log('✅ Aidant approuvé:', aidantId);
+    emailSent = emailResult.success;
+    emailError = emailResult.success ? null : emailResult.error;
+
+    const duration = Date.now() - startTime;
+    console.log(`✅ [APPROVE] Aidant approuvé en ${duration}ms - Email: ${emailSent ? '✅' : '❌'}`);
+
     res.json({
       success: true,
-      message: 'Aidant approuvé avec succès',
+      message: emailSent 
+        ? 'Aidant approuvé avec succès. Un email de confirmation a été envoyé.'
+        : 'Aidant approuvé avec succès. (⚠️ L\'email n\'a pas pu être envoyé)',
+      email_sent: emailSent,
+      email_error: emailError,
+      aidant_id: aidantId,
     });
 
   } catch (error) {
-    console.error('❌ Approve aidant error:', error);
+    const duration = Date.now() - startTime;
+    console.error(`❌ [APPROVE] Erreur après ${duration}ms:`, error);
     res.status(500).json({
       success: false,
       error: error.message || 'Erreur lors de l\'approbation',
+      email_sent: emailSent,
+      email_error: emailError || error.message,
     });
   }
 });
 
 // =============================================
-// ADMIN - REFUSER UN AIDANT
+// ADMIN - REFUSER UN AIDANT AVEC EMAIL ET RETRY
 // =============================================
 router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  let emailSent = false;
+  let emailError = null;
+
   try {
     const { aidantId, comments } = req.body;
     const { user, profile } = req;
@@ -900,6 +1057,9 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       });
     }
 
+    console.log(`🔍 [REJECT] Début refus aidant ${aidantId}`);
+
+    // 1. Récupérer l'aidant avec son profil
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*, user:profiles(*)')
@@ -914,7 +1074,10 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       });
     }
 
-    await supabase
+    console.log(`👤 Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
+
+    // 2. Mettre à jour l'aidant
+    const { error: aidantUpdateError } = await supabase
       .from('aidants')
       .update({ 
         is_verified: false,
@@ -923,6 +1086,15 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       })
       .eq('id', aidantId);
 
+    if (aidantUpdateError) {
+      console.error('❌ Erreur mise à jour aidant:', aidantUpdateError);
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur lors de la mise à jour de l\'aidant',
+      });
+    }
+
+    // 3. Mettre à jour l'inscription
     await supabase
       .from('inscriptions')
       .update({ 
@@ -933,36 +1105,49 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       })
       .eq('user_id', aidant.user_id);
 
-    await supabase
-      .from('notifications')
-      .insert({
-        user_id: aidant.user_id,
-        title: '❌ Candidature non retenue',
-        body: `Bonjour ${aidant.user?.full_name || 'Aidant'}, nous vous remercions pour votre intérêt. Votre candidature n'a pas été retenue pour le moment.`,
-        type: 'system',
-        is_read: false,
-      });
+    // 4. Notification
+    await supabase.from('notifications').insert({
+      user_id: aidant.user_id,
+      title: '❌ Candidature non retenue',
+      body: `Bonjour ${aidant.user?.full_name || 'Aidant'}, nous vous remercions pour votre intérêt. Votre candidature n'a pas été retenue pour le moment.`,
+      type: 'system',
+      is_read: false,
+    });
 
-    try {
-      await sendEmail({ 
+    // 5. ✅ ENVOYER L'EMAIL DE REFUS AVEC RETRY
+    console.log('📧 Envoi email de refus...');
+    const emailResult = await sendEmailWithLog(
+      { 
         to: aidant.user?.email, 
         ...templates.aidantRejected(aidant.user?.full_name || 'Aidant') 
-      });
-    } catch (emailError) {
-      console.error('❌ Erreur envoi email:', emailError);
-    }
+      },
+      'REJECT'
+    );
 
-    console.log('✅ Aidant refusé:', aidantId);
+    emailSent = emailResult.success;
+    emailError = emailResult.success ? null : emailResult.error;
+
+    const duration = Date.now() - startTime;
+    console.log(`✅ [REJECT] Aidant refusé en ${duration}ms - Email: ${emailSent ? '✅' : '❌'}`);
+
     res.json({
       success: true,
-      message: 'Aidant refusé',
+      message: emailSent 
+        ? 'Aidant refusé. Un email de notification a été envoyé.'
+        : 'Aidant refusé. (⚠️ L\'email n\'a pas pu être envoyé)',
+      email_sent: emailSent,
+      email_error: emailError,
+      aidant_id: aidantId,
     });
 
   } catch (error) {
-    console.error('❌ Reject aidant error:', error);
+    const duration = Date.now() - startTime;
+    console.error(`❌ [REJECT] Erreur après ${duration}ms:`, error);
     res.status(500).json({
       success: false,
       error: error.message || 'Erreur lors du refus',
+      email_sent: emailSent,
+      email_error: emailError || error.message,
     });
   }
 });
