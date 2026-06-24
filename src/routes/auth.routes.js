@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/auth.routes.js
-// VERSION PRODUCTION - AVEC RETRY ET LOGS COMPLETS
+// VERSION PRODUCTION - COMPLETE ET PROPRE
 
 const express = require('express');
 const router = express.Router();
@@ -59,6 +59,75 @@ async function sendEmailWithLog(emailData, context) {
 
   return result;
 }
+
+// =============================================
+// ROUTE DE TEST - VÉRIFIER QUE L'ADMIN EST CONNECTÉ
+// =============================================
+router.get('/admin/test', authMiddleware, async (req, res) => {
+  console.log('🔴 ===== ROUTE TEST ADMIN APPELEE =====');
+  console.log('🔴 User:', req.user?.id);
+  console.log('🔴 Profile:', req.profile);
+  
+  res.json({
+    success: true,
+    message: 'Route admin fonctionne',
+    user_id: req.user?.id,
+    role: req.profile?.role,
+  });
+});
+
+// =============================================
+// ROUTE DE TEST - APPROUVER UN AIDANT (SANS AUTH POUR TEST)
+// =============================================
+router.post('/admin/test-approve', async (req, res) => {
+  console.log('🔴 ===== ROUTE TEST APPROVE SANS AUTH =====');
+  console.log('🔴 Body:', req.body);
+  
+  try {
+    const { aidantId } = req.body;
+    
+    if (!aidantId) {
+      return res.status(400).json({ success: false, error: 'aidantId requis' });
+    }
+    
+    const { data: aidant, error } = await supabase
+      .from('aidants')
+      .select('*, user:profiles(*)')
+      .eq('id', aidantId)
+      .single();
+      
+    if (error || !aidant) {
+      return res.status(404).json({ success: false, error: 'Aidant non trouvé' });
+    }
+    
+    console.log('👤 Aidant trouvé:', aidant.user?.email);
+    
+    await supabase
+      .from('profiles')
+      .update({ is_active: true, role: 'aidant' })
+      .eq('id', aidant.user_id);
+      
+    await supabase
+      .from('aidants')
+      .update({ is_verified: true, available: true, status: 'approved' })
+      .eq('id', aidantId);
+      
+    await sendEmail({
+      to: aidant.user?.email,
+      ...templates.aidantApproved(aidant.user?.full_name || 'Aidant')
+    });
+    
+    res.json({
+      success: true,
+      message: 'Aidant approuvé avec succès (test sans auth)',
+      email_sent: true,
+    });
+    
+  } catch (error) {
+    console.error('❌ Erreur test approve:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // =============================================
 // INSCRIPTION - Version avec support Aidant
@@ -365,7 +434,6 @@ router.post('/register', async (req, res) => {
       message = 'Compte créé avec succès. Votre demande est en attente de validation.';
     }
 
-    // Ajouter un avertissement si l'email a échoué
     if (!emailSent) {
       message += ' (⚠️ L\'email de confirmation n\'a pas pu être envoyé, mais votre compte est bien créé)';
     }
@@ -464,7 +532,6 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
 
     console.log(`🔍 [PROCESS] Traitement inscription ${registrationId} → ${status}`);
 
-    // 1. Récupérer l'inscription
     const { data: registration, error: regError } = await supabase
       .from('inscriptions')
       .select('*, user:profiles(*)')
@@ -479,7 +546,6 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
 
     console.log(`👤 Inscription pour: ${registration.user?.full_name} (${registration.user?.email})`);
 
-    // 2. Mettre à jour l'inscription
     const { error: updateError } = await supabase
       .from('inscriptions')
       .update({
@@ -492,7 +558,6 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
 
     if (updateError) throw updateError;
 
-    // 3. Si validée, activer le compte
     if (status === 'validee') {
       console.log('🔍 Activation du compte...');
       await supabase
@@ -500,7 +565,6 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
         .update({ is_active: true })
         .eq('id', registration.user_id);
 
-      // Si c'est un aidant, le marquer comme approuvé
       const { data: aidant } = await supabase
         .from('aidants')
         .select('id')
@@ -520,7 +584,6 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
       }
     }
 
-    // 4. ENVOYER L'EMAIL AVEC RETRY
     const user = registration.user;
     if (user?.email) {
       console.log(`📧 Envoi email de ${status === 'validee' ? 'validation' : 'refus'}...`);
@@ -557,15 +620,8 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
       const emailResult = await sendEmailWithLog(emailData, `PROCESS_${status.toUpperCase()}`);
       emailSent = emailResult.success;
       emailError = emailResult.success ? null : emailResult.error;
-
-      if (emailSent) {
-        console.log(`✅ Email ${status === 'validee' ? 'de validation' : 'de refus'} envoyé`);
-      } else {
-        console.warn(`⚠️ Email ${status === 'validee' ? 'de validation' : 'de refus'} non envoyé`);
-      }
     }
 
-    // 5. Notification
     await supabase.from('notifications').insert({
       user_id: registration.user_id,
       title: status === 'validee' ? '✅ Inscription validée' : '❌ Inscription refusée',
@@ -643,7 +699,6 @@ router.post('/forgot-password', async (req, res) => {
 
     const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${data?.access_token || ''}`;
     
-    // ✅ Envoi email avec retry
     try {
       await sendEmailWithLog({ 
         to: email, 
@@ -906,9 +961,6 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
   }
 });
 
-
-
-
 // =============================================
 // ADMIN - APPROUVER UN AIDANT AVEC EMAIL
 // =============================================
@@ -928,7 +980,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
 
     console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
 
-    // Vérification des droits
     if (profile.role !== 'admin' && profile.role !== 'coordinator') {
       console.error('❌ [APPROVE] Non autorisé - Rôle:', profile.role);
       return res.status(403).json({
@@ -937,7 +988,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       });
     }
 
-    // 1. Récupérer l'aidant avec son profil
     console.log('🔍 [APPROVE] Récupération de l\'aidant...');
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
@@ -956,7 +1006,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     console.log(`👤 [APPROVE] Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
     console.log(`👤 [APPROVE] Statut actuel: is_active=${aidant.user?.is_active}, aidant_status=${aidant.status}`);
 
-    // 2. Mettre à jour le profil
     console.log('🔍 [APPROVE] Mise à jour du profil...');
     const { error: profileUpdateError } = await supabase
       .from('profiles')
@@ -975,7 +1024,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     }
     console.log('✅ [APPROVE] Profil mis à jour');
 
-    // 3. Mettre à jour l'aidant
     console.log('🔍 [APPROVE] Mise à jour de l\'aidant...');
     const { error: aidantUpdateError } = await supabase
       .from('aidants')
@@ -996,7 +1044,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     }
     console.log('✅ [APPROVE] Aidant mis à jour');
 
-    // 4. Mettre à jour l'inscription
     console.log('🔍 [APPROVE] Mise à jour de l\'inscription...');
     await supabase
       .from('inscriptions')
@@ -1009,7 +1056,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       .eq('user_id', aidant.user_id);
     console.log('✅ [APPROVE] Inscription mise à jour');
 
-    // 5. Notification
     console.log('🔍 [APPROVE] Envoi notification...');
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
@@ -1020,7 +1066,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     });
     console.log('✅ [APPROVE] Notification envoyée');
 
-    // 6. ✅ ENVOYER L'EMAIL D'APPROBATION
     console.log('📧 [APPROVE] Préparation de l\'email...');
     console.log('📧 [APPROVE] Email destinataire:', aidant.user?.email);
     console.log('📧 [APPROVE] Nom destinataire:', aidant.user?.full_name || 'Aidant');
@@ -1098,7 +1143,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
 
     console.log(`🔍 [REJECT] Début refus aidant ${aidantId}`);
 
-    // 1. Récupérer l'aidant avec son profil
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*, user:profiles(*)')
@@ -1115,7 +1159,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
 
     console.log(`👤 Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
 
-    // 2. Mettre à jour l'aidant
     await supabase
       .from('aidants')
       .update({ 
@@ -1125,7 +1168,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       })
       .eq('id', aidantId);
 
-    // 3. Mettre à jour l'inscription
     await supabase
       .from('inscriptions')
       .update({ 
@@ -1136,7 +1178,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       })
       .eq('user_id', aidant.user_id);
 
-    // 4. Notification
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
       title: '❌ Candidature non retenue',
@@ -1145,7 +1186,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       is_read: false,
     });
 
-    // 5. ✅ ENVOYER L'EMAIL DE REFUS
     console.log('📧 Envoi email de refus...');
     const emailResult = await sendEmailWithLog(
       { 
@@ -1180,80 +1220,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       email_sent: emailSent,
       email_error: emailError || error.message,
     });
-  }
-});
-// 📁 backend/src/routes/auth.routes.js
-// AJOUTER CETTE ROUTE DE TEST EN HAUT DU FICHIER
-
-// =============================================
-// ROUTE DE TEST - VÉRIFIER QUE L'ADMIN EST CONNECTÉ
-// =============================================
-router.get('/admin/test', authMiddleware, async (req, res) => {
-  console.log('🔴 ===== ROUTE TEST ADMIN APPELEE =====');
-  console.log('🔴 User:', req.user?.id);
-  console.log('🔴 Profile:', req.profile);
-  
-  res.json({
-    success: true,
-    message: 'Route admin fonctionne',
-    user_id: req.user?.id,
-    role: req.profile?.role,
-  });
-});
-
-// =============================================
-// ROUTE DE TEST - APPROUVER UN AIDANT (SANS AUTH POUR TEST)
-// =============================================
-router.post('/admin/test-approve', async (req, res) => {
-  console.log('🔴 ===== ROUTE TEST APPROVE SANS AUTH =====');
-  console.log('🔴 Body:', req.body);
-  
-  try {
-    const { aidantId } = req.body;
-    
-    if (!aidantId) {
-      return res.status(400).json({ success: false, error: 'aidantId requis' });
-    }
-    
-    // Récupérer l'aidant
-    const { data: aidant, error } = await supabase
-      .from('aidants')
-      .select('*, user:profiles(*)')
-      .eq('id', aidantId)
-      .single();
-      
-    if (error || !aidant) {
-      return res.status(404).json({ success: false, error: 'Aidant non trouvé' });
-    }
-    
-    console.log('👤 Aidant trouvé:', aidant.user?.email);
-    
-    // Mettre à jour
-    await supabase
-      .from('profiles')
-      .update({ is_active: true, role: 'aidant' })
-      .eq('id', aidant.user_id);
-      
-    await supabase
-      .from('aidants')
-      .update({ is_verified: true, available: true, status: 'approved' })
-      .eq('id', aidantId);
-      
-    // Envoyer l'email
-    await sendEmail({
-      to: aidant.user?.email,
-      ...templates.aidantApproved(aidant.user?.full_name || 'Aidant')
-    });
-    
-    res.json({
-      success: true,
-      message: 'Aidant approuvé avec succès (test sans auth)',
-      email_sent: true,
-    });
-    
-  } catch (error) {
-    console.error('❌ Erreur test approve:', error);
-    res.status(500).json({ success: false, error: error.message });
   }
 });
 
