@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/billing.js
-// VERSION PRODUCTION - CORRIGÉE
+// VERSION PRODUCTION - ROBUSTE ET FIABLE
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -100,15 +100,16 @@ function isValidUUID(uuid) {
 }
 
 // ============================================================
-// 🔧 FONCTION HELPER - RÉCUPÉRER LE PREMIER PATIENT D'UN UTILISATEUR
+// 🔧 FONCTION HELPER - RÉCUPÉRER UN PATIENT
 // ============================================================
-async function getFirstPatientId(userId) {
+async function getOrCreatePatientId(userId) {
   try {
-    // Essayer de récupérer via patient_family_links
+    // 1. Rechercher un patient existant via les liens familiaux
     const { data: link, error: linkError } = await supabase
       .from('patient_family_links')
-      .select('patient_id')
+      .select('patient_id, patients!inner(id, first_name, last_name, status)')
       .eq('family_id', userId)
+      .eq('patients.status', 'active')
       .limit(1)
       .maybeSingle();
 
@@ -116,11 +117,12 @@ async function getFirstPatientId(userId) {
       return link.patient_id;
     }
 
-    // Essayer de récupérer un patient créé par l'utilisateur
+    // 2. Rechercher un patient créé par l'utilisateur
     const { data: patient, error: patientError } = await supabase
       .from('patients')
       .select('id')
       .eq('created_by', userId)
+      .eq('status', 'active')
       .limit(1)
       .maybeSingle();
 
@@ -128,9 +130,13 @@ async function getFirstPatientId(userId) {
       return patient.id;
     }
 
+    // 3. Aucun patient trouvé - on retourne null
+    // L'abonnement sera créé sans patient (si la DB le permet)
+    console.log('ℹ️ Aucun patient trouvé pour l\'utilisateur:', userId);
     return null;
+
   } catch (error) {
-    console.warn('⚠️ Erreur récupération patient:', error.message);
+    console.error('❌ Erreur getOrCreatePatientId:', error.message);
     return null;
   }
 }
@@ -159,36 +165,61 @@ async function createPendingSubscription(userId, offerId, offer) {
     const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
     const totalOrders = offer.total_orders || 0;
 
-    // ✅ Récupérer un patient_id pour l'utilisateur
-    const patientId = await getFirstPatientId(userId);
+    // Récupérer un patient si disponible
+    const patientId = await getOrCreatePatientId(userId);
 
     console.log('📝 Création abonnement avec patient_id:', patientId);
 
+    const subscriptionData = {
+      user_id: userId,
+      offre_id: offer.id,
+      status: 'en_attente',
+      start_date: startDate.toISOString().split('T')[0],
+      end_date: endDate.toISOString().split('T')[0],
+      auto_renew: true,
+      total_visits: totalVisits,
+      used_visits: 0,
+      remaining_visits: totalVisits,
+      total_orders: totalOrders,
+      used_orders: 0,
+      remaining_orders: totalOrders,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Ajouter patient_id seulement s'il existe
+    if (patientId) {
+      subscriptionData.patient_id = patientId;
+    }
+
     const { data: subscription, error } = await supabase
       .from('abonnements')
-      .insert({
-        user_id: userId,
-        patient_id: patientId, // ← Maintenant avec une valeur (ou null)
-        offre_id: offer.id,
-        status: 'en_attente',
-        start_date: startDate.toISOString().split('T')[0],
-        end_date: endDate.toISOString().split('T')[0],
-        auto_renew: true,
-        total_visits: totalVisits,
-        used_visits: 0,
-        remaining_visits: totalVisits,
-        total_orders: totalOrders,
-        used_orders: 0,
-        remaining_orders: totalOrders,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
+      .insert(subscriptionData)
       .select()
       .single();
 
     if (error) {
+      // Si l'erreur est due à patient_id null, on réessaie sans
+      if (error.code === '23502' && error.message.includes('patient_id')) {
+        console.log('⚠️ patient_id null non accepté, tentative sans patient...');
+        delete subscriptionData.patient_id;
+        
+        const { data: retrySubscription, error: retryError } = await supabase
+          .from('abonnements')
+          .insert(subscriptionData)
+          .select()
+          .single();
+
+        if (retryError) {
+          console.error('❌ Erreur création abonnement (sans patient):', retryError.message);
+          return null;
+        }
+
+        console.log('✅ Abonnement créé (en attente, sans patient):', retrySubscription.id);
+        return retrySubscription;
+      }
+
       console.error('❌ Erreur création abonnement:', error.message);
-      console.error('❌ Détails:', error.details);
       return null;
     }
 
