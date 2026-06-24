@@ -1182,6 +1182,79 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
     });
   }
 });
+// 📁 backend/src/routes/auth.routes.js
+// AJOUTER CETTE ROUTE DE TEST EN HAUT DU FICHIER
 
+// =============================================
+// ROUTE DE TEST - VÉRIFIER QUE L'ADMIN EST CONNECTÉ
+// =============================================
+router.get('/admin/test', authMiddleware, async (req, res) => {
+  console.log('🔴 ===== ROUTE TEST ADMIN APPELEE =====');
+  console.log('🔴 User:', req.user?.id);
+  console.log('🔴 Profile:', req.profile);
+  
+  res.json({
+    success: true,
+    message: 'Route admin fonctionne',
+    user_id: req.user?.id,
+    role: req.profile?.role,
+  });
+});
+
+// =============================================
+// ROUTE DE TEST - APPROUVER UN AIDANT (SANS AUTH POUR TEST)
+// =============================================
+router.post('/admin/test-approve', async (req, res) => {
+  console.log('🔴 ===== ROUTE TEST APPROVE SANS AUTH =====');
+  console.log('🔴 Body:', req.body);
+  
+  try {
+    const { aidantId } = req.body;
+    
+    if (!aidantId) {
+      return res.status(400).json({ success: false, error: 'aidantId requis' });
+    }
+    
+    // Récupérer l'aidant
+    const { data: aidant, error } = await supabase
+      .from('aidants')
+      .select('*, user:profiles(*)')
+      .eq('id', aidantId)
+      .single();
+      
+    if (error || !aidant) {
+      return res.status(404).json({ success: false, error: 'Aidant non trouvé' });
+    }
+    
+    console.log('👤 Aidant trouvé:', aidant.user?.email);
+    
+    // Mettre à jour
+    await supabase
+      .from('profiles')
+      .update({ is_active: true, role: 'aidant' })
+      .eq('id', aidant.user_id);
+      
+    await supabase
+      .from('aidants')
+      .update({ is_verified: true, available: true, status: 'approved' })
+      .eq('id', aidantId);
+      
+    // Envoyer l'email
+    await sendEmail({
+      to: aidant.user?.email,
+      ...templates.aidantApproved(aidant.user?.full_name || 'Aidant')
+    });
+    
+    res.json({
+      success: true,
+      message: 'Aidant approuvé avec succès (test sans auth)',
+      email_sent: true,
+    });
+    
+  } catch (error) {
+    console.error('❌ Erreur test approve:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 module.exports = router;
