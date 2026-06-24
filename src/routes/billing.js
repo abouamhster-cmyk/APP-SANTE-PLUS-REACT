@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/billing.js
-// VERSION PRODUCTION - ROBUSTE ET FIABLE
+// VERSION PRODUCTION - CORRIGÉE
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -100,6 +100,42 @@ function isValidUUID(uuid) {
 }
 
 // ============================================================
+// 🔧 FONCTION HELPER - RÉCUPÉRER LE PREMIER PATIENT D'UN UTILISATEUR
+// ============================================================
+async function getFirstPatientId(userId) {
+  try {
+    // Essayer de récupérer via patient_family_links
+    const { data: link, error: linkError } = await supabase
+      .from('patient_family_links')
+      .select('patient_id')
+      .eq('family_id', userId)
+      .limit(1)
+      .maybeSingle();
+
+    if (!linkError && link) {
+      return link.patient_id;
+    }
+
+    // Essayer de récupérer un patient créé par l'utilisateur
+    const { data: patient, error: patientError } = await supabase
+      .from('patients')
+      .select('id')
+      .eq('created_by', userId)
+      .limit(1)
+      .maybeSingle();
+
+    if (!patientError && patient) {
+      return patient.id;
+    }
+
+    return null;
+  } catch (error) {
+    console.warn('⚠️ Erreur récupération patient:', error.message);
+    return null;
+  }
+}
+
+// ============================================================
 // 🔧 FONCTION HELPER - CRÉER UN ABONNEMENT EN ATTENTE
 // ============================================================
 async function createPendingSubscription(userId, offerId, offer) {
@@ -123,11 +159,16 @@ async function createPendingSubscription(userId, offerId, offer) {
     const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
     const totalOrders = offer.total_orders || 0;
 
+    // ✅ Récupérer un patient_id pour l'utilisateur
+    const patientId = await getFirstPatientId(userId);
+
+    console.log('📝 Création abonnement avec patient_id:', patientId);
+
     const { data: subscription, error } = await supabase
       .from('abonnements')
       .insert({
         user_id: userId,
-        patient_id: null,
+        patient_id: patientId, // ← Maintenant avec une valeur (ou null)
         offre_id: offer.id,
         status: 'en_attente',
         start_date: startDate.toISOString().split('T')[0],
@@ -147,6 +188,7 @@ async function createPendingSubscription(userId, offerId, offer) {
 
     if (error) {
       console.error('❌ Erreur création abonnement:', error.message);
+      console.error('❌ Détails:', error.details);
       return null;
     }
 
@@ -437,9 +479,10 @@ router.post('/generate-payment', async (req, res) => {
       // ✅ Créer l'abonnement en statut 'en_attente'
       subscriptionRecord = await createPendingSubscription(user.id, offer.id, offer);
       if (!subscriptionRecord) {
+        console.error('❌ Échec création abonnement');
         return res.status(500).json({
           success: false,
-          message: 'Erreur lors de la création de l\'abonnement',
+          message: 'Erreur lors de la création de l\'abonnement. Veuillez réessayer.',
         });
       }
 
@@ -569,7 +612,7 @@ router.post('/generate-payment', async (req, res) => {
 
       return res.status(500).json({
         success: false,
-        message: 'Erreur lors de l\'enregistrement du paiement',
+        message: 'Erreur lors de l\'enregistrement du paiement. Veuillez réessayer.',
       });
     }
 
