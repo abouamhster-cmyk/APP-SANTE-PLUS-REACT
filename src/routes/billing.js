@@ -1,4 +1,4 @@
-// 📁 backend/src/routes/billing.js
+ // 📁 backend/src/routes/billing.js
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -154,7 +154,6 @@ router.post('/generate-payment', async (req, res) => {
     // ============================================================
     // 5. CRÉER LA TRANSACTION FEDAPAY
     // ============================================================
-    // ✅ Construction des métadonnées
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -165,7 +164,6 @@ router.post('/generate-payment', async (req, res) => {
       order_data: is_ponctual ? order_data : null,
     };
 
-    // ✅ Pour les commandes ponctuelles, on supprime abonnement_id
     if (is_ponctual) {
       delete metadata.abonnement_id;
     }
@@ -205,7 +203,7 @@ router.post('/generate-payment', async (req, res) => {
     }
 
     // ============================================================
-    // 6. ENREGISTRER LE PAIEMENT EN BASE (AVEC TOUTES LES MÉTADONNÉES)
+    // 6. ENREGISTRER LE PAIEMENT EN BASE
     // ============================================================
     const paymentData = {
       user_id: user.id,
@@ -214,11 +212,11 @@ router.post('/generate-payment', async (req, res) => {
       method: 'fedapay',
       reference: String(transaction.id),
       status: 'en_attente',
-      abonnement_id: is_ponctual ? null : abonnement_id || null,
+      abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
       metadata: {
         description: description || 'Abonnement Santé Plus',
         plan_id: plan_id || null,
-        abonnement_id: is_ponctual ? null : abonnement_id || null,
+        abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
         order_id: order_id || null,
         is_ponctual: is_ponctual || false,
         transaction_id: String(transaction.id),
@@ -232,7 +230,7 @@ router.post('/generate-payment', async (req, res) => {
       user_id: user.id,
       amount: finalAmount,
       is_ponctual: is_ponctual,
-      abonnement_id: is_ponctual ? null : abonnement_id || null,
+      abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
     });
 
     const { data: payment, error: dbError } = await supabase
@@ -252,9 +250,6 @@ router.post('/generate-payment', async (req, res) => {
       console.log('✅ Paiement enregistré en base:', payment?.id);
     }
 
-    // ============================================================
-    // 7. RÉPONSE
-    // ============================================================
     return res.json({
       success: true,
       payment_url: paymentUrl,
@@ -347,13 +342,10 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - VERSION CORRIGÉE
+// 🔔 WEBHOOK FEDAPAY - VERSION FINALE
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    // ============================================================
-    // 1. PARSING ROBUSTE DU BODY
-    // ============================================================
     let body = req.body;
 
     if (Buffer.isBuffer(body)) {
@@ -367,9 +359,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     console.log('📥 Webhook reçu - body parsé:', JSON.stringify(body, null, 2));
 
-    // ============================================================
-    // 2. EXTRACTION DES DONNÉES
-    // ============================================================
     const event = body?.event || body?.name;
     const data = body?.data || body?.entity;
 
@@ -385,37 +374,46 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     console.log('📥 Événement reçu:', event);
     console.log('📥 Data ID:', data?.id);
 
-    // ============================================================
-    // 3. TRAITER UNIQUEMENT LES TRANSACTIONS APPROUVÉES
-    // ============================================================
     if (event === 'transaction.approved' || event === 'transaction.paid') {
       const transactionId = String(data.id);
 
       console.log('💰 Transaction approuvée:', transactionId);
 
       // ============================================================
-      // 4. RÉCUPÉRER LE PAIEMENT EN BASE (avec ses métadonnées)
-      // ⚠️ C'est ICI la clé : on ne compte PAS sur les métadonnées de FedaPay
+      // RÉCUPÉRER LE PAIEMENT EN BASE
       // ============================================================
-      const { data: payment, error: findError } = await supabase
+      let payment = await supabase
         .from('paiements')
         .select('*')
         .eq('reference', transactionId)
-        .maybeSingle();
+        .maybeSingle()
+        .then(res => res.data);
 
-      if (findError || !payment) {
-        console.error('❌ Paiement non trouvé en base:', findError);
+      // ✅ RETRY si le paiement n'est pas encore en base
+      if (!payment) {
+        console.log('⏳ Paiement non trouvé, attente 2 secondes...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        payment = await supabase
+          .from('paiements')
+          .select('*')
+          .eq('reference', transactionId)
+          .maybeSingle()
+          .then(res => res.data);
+      }
+
+      if (!payment) {
+        console.error('❌ Paiement non trouvé après réessai');
         return res.status(404).json({
           success: false,
           error: 'Paiement non trouvé',
-          details: findError?.message,
         });
       }
 
       console.log('✅ Paiement trouvé en base:', payment.id);
 
       // ============================================================
-      // 5. EXTRAIRE LES MÉTADONNÉES DEPUIS LA BASE (PAS DEPUIS FEDAPAY)
+      // EXTRAIRE LES MÉTADONNÉES DE LA BASE
       // ============================================================
       const metadata = payment.metadata || {};
       const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
@@ -427,7 +425,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log('📦 orderData (depuis base):', orderData);
 
       // ============================================================
-      // 6. METTRE À JOUR LE STATUT DU PAIEMENT
+      // METTRE À JOUR LE STATUT DU PAIEMENT
       // ============================================================
       const { data: updatedPayment, error: updateError } = await supabase
         .from('paiements')
@@ -451,14 +449,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       const paymentRecord = updatedPayment;
 
       // ============================================================
-      // 7. TRAITER LA COMMANDE OU L'ABONNEMENT
+      // TRAITER LA COMMANDE OU L'ABONNEMENT
       // ============================================================
       if (isPonctual) {
-        // ✅ 7a. COMMANDE PONCTUELLE
+        // ✅ COMMANDE PONCTUELLE
         console.log('📦 Création de la commande ponctuelle...');
 
         // Vérifier les doublons
-        const { data: existingOrders, error: checkError } = await supabase
+        const { data: existingOrders } = await supabase
           .from('commandes')
           .select('id')
           .eq('family_id', paymentRecord.user_id)
@@ -467,14 +465,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           .eq('metadata->>transaction_id', transactionId)
           .limit(1);
 
-        if (checkError) {
-          console.warn('⚠️ Erreur vérification commande existante:', checkError);
-        }
-
         if (existingOrders && existingOrders.length > 0) {
-          console.log('ℹ️ Commande déjà créée pour cette transaction:', transactionId);
+          console.log('ℹ️ Commande déjà créée pour cette transaction');
         } else {
-          // ✅ Créer la commande
           const orderDataToInsert = orderData || {};
 
           const { data: newOrder, error: orderError } = await supabase
@@ -503,28 +496,23 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
           if (orderError) {
             console.error('❌ Erreur création commande:', orderError);
-            console.error('❌ Détails:', orderError.message);
           } else {
             console.log('✅ Commande ponctuelle créée:', newOrder.id);
 
-            // ✅ Notification de confirmation
             await supabase.from('notifications').insert({
               user_id: paymentRecord.user_id,
               title: '✅ Commande confirmée !',
-              body: `Votre commande "${orderDataToInsert.description || 'Commande ponctuelle'}" a été enregistrée avec succès. Vous serez notifié de son avancement.`,
+              body: `Votre commande "${orderDataToInsert.description || 'Commande ponctuelle'}" a été enregistrée avec succès.`,
               type: 'commande',
               data: {
                 order_id: newOrder.id,
                 status: 'creee',
-                message: 'Commande créée avec succès'
               },
             });
-
-            console.log('📧 Notification envoyée à l\'utilisateur:', paymentRecord.user_id);
           }
         }
       } else if (subscriptionId) {
-        // ✅ 7b. ABONNEMENT
+        // ✅ ABONNEMENT
         console.log('📦 Activation de l\'abonnement:', subscriptionId);
 
         const { data: subscription, error: subError } = await supabase
@@ -545,7 +533,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           await supabase.from('notifications').insert({
             user_id: paymentRecord.user_id,
             title: '✅ Abonnement activé !',
-            body: `Votre abonnement est maintenant actif. Profitez de nos services !`,
+            body: `Votre abonnement est maintenant actif.`,
             type: 'paiement',
             data: {
               subscription_id: subscriptionId,
@@ -556,7 +544,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       }
 
       // ============================================================
-      // 8. NOTIFICATION DE PAIEMENT
+      // NOTIFICATION DE PAIEMENT
       // ============================================================
       await supabase.from('notifications').insert({
         user_id: paymentRecord.user_id,
@@ -573,9 +561,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       });
     }
 
-    // ============================================================
-    // 9. AUTRES ÉVÉNEMENTS (ignorés)
-    // ============================================================
     console.log('ℹ️ Événement ignoré:', event);
     return res.json({
       success: true,
@@ -586,7 +571,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
   } catch (error) {
     console.error('❌ Webhook error:', error);
     console.error('❌ Stack:', error.stack);
-    console.error('❌ Body reçu brut:', req.body);
 
     return res.status(500).json({
       success: false,
