@@ -100,6 +100,66 @@ function isValidUUID(uuid) {
 }
 
 // ============================================================
+// 🔧 FONCTION HELPER - CRÉER UN ABONNEMENT EN ATTENTE
+// ============================================================
+async function createPendingSubscription(userId, offerId, offer) {
+  try {
+    const startDate = new Date();
+    const endDate = new Date();
+
+    switch (offer.type) {
+      case 'trimestrielle':
+        endDate.setMonth(endDate.getMonth() + 3);
+        break;
+      case 'annuelle':
+        endDate.setFullYear(endDate.getFullYear() + 1);
+        break;
+      case 'mensuelle':
+      default:
+        endDate.setMonth(endDate.getMonth() + 1);
+        break;
+    }
+
+    const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
+    const totalOrders = offer.total_orders || 0;
+
+    const { data: subscription, error } = await supabase
+      .from('abonnements')
+      .insert({
+        user_id: userId,
+        patient_id: null,
+        offre_id: offer.id,
+        status: 'en_attente',
+        start_date: startDate.toISOString().split('T')[0],
+        end_date: endDate.toISOString().split('T')[0],
+        auto_renew: true,
+        total_visits: totalVisits,
+        used_visits: 0,
+        remaining_visits: totalVisits,
+        total_orders: totalOrders,
+        used_orders: 0,
+        remaining_orders: totalOrders,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Erreur création abonnement:', error.message);
+      return null;
+    }
+
+    console.log('✅ Abonnement créé (en attente):', subscription.id);
+    return subscription;
+
+  } catch (error) {
+    console.error('❌ Erreur createPendingSubscription:', error.message);
+    return null;
+  }
+}
+
+// ============================================================
 // 🔧 FONCTION HELPER - CRÉER UNE COMMANDE PONCTUELLE
 // ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
@@ -353,7 +413,42 @@ router.post('/generate-payment', async (req, res) => {
     const cancelUrl = `${frontendUrl}/payment/confirm?status=cancel`;
 
     // ============================================================
-    // 4. INITIALISER FEDAPAY
+    // 4. SI ABONNEMENT : CRÉER L'ABONNEMENT AVANT LE PAIEMENT
+    // ============================================================
+    let subscriptionRecord = null;
+    let actualAbonnementId = null;
+
+    if (!is_ponctual && abonnement_id) {
+      // ✅ Vérifier que l'offre existe
+      const { data: offer, error: offerError } = await supabase
+        .from('offres')
+        .select('id, name, type, price, visits_per_week, duration_days, total_visits, total_orders')
+        .eq('id', abonnement_id)
+        .single();
+
+      if (offerError) {
+        console.error('❌ Offre non trouvée:', offerError.message);
+        return res.status(400).json({
+          success: false,
+          message: 'Offre non trouvée',
+        });
+      }
+
+      // ✅ Créer l'abonnement en statut 'en_attente'
+      subscriptionRecord = await createPendingSubscription(user.id, offer.id, offer);
+      if (!subscriptionRecord) {
+        return res.status(500).json({
+          success: false,
+          message: 'Erreur lors de la création de l\'abonnement',
+        });
+      }
+
+      actualAbonnementId = subscriptionRecord.id;
+      console.log('✅ Abonnement créé (en attente):', actualAbonnementId);
+    }
+
+    // ============================================================
+    // 5. INITIALISER FEDAPAY
     // ============================================================
     FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
     FedaPay.setEnvironment(FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live');
@@ -364,16 +459,16 @@ router.post('/generate-payment', async (req, res) => {
       email: finalEmail,
       description: description || 'Abonnement Santé Plus',
       is_ponctual: is_ponctual || false,
-      abonnement_id: abonnement_id || null,
+      abonnement_id: actualAbonnementId || null,
     });
 
     // ============================================================
-    // 5. CRÉER LA TRANSACTION FEDAPAY
+    // 6. CRÉER LA TRANSACTION FEDAPAY
     // ============================================================
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
-      abonnement_id: abonnement_id || null,
+      abonnement_id: actualAbonnementId || null,
       order_id: order_id || null,
       is_ponctual: is_ponctual || false,
       source: 'sante_plus_services',
@@ -419,7 +514,7 @@ router.post('/generate-payment', async (req, res) => {
     }
 
     // ============================================================
-    // 6. ENREGISTRER LE PAIEMENT EN BASE
+    // 7. ENREGISTRER LE PAIEMENT EN BASE
     // ============================================================
     const paymentData = {
       user_id: user.id,
@@ -428,11 +523,11 @@ router.post('/generate-payment', async (req, res) => {
       method: 'fedapay',
       reference: String(transaction.id),
       status: 'en_attente',
-      abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
+      abonnement_id: actualAbonnementId || null,
       metadata: {
         description: description || 'Abonnement Santé Plus',
         plan_id: plan_id || null,
-        abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
+        abonnement_id: actualAbonnementId || null,
         order_id: order_id || null,
         is_ponctual: is_ponctual || false,
         transaction_id: String(transaction.id),
@@ -446,7 +541,7 @@ router.post('/generate-payment', async (req, res) => {
       user_id: user.id,
       amount: finalAmount,
       is_ponctual: is_ponctual,
-      abonnement_id: is_ponctual ? null : (abonnement_id || plan_id || null),
+      abonnement_id: actualAbonnementId || null,
     });
 
     const { data: payment, error: dbError } = await supabase
@@ -462,14 +557,42 @@ router.post('/generate-payment', async (req, res) => {
         message: dbError.message,
         details: dbError.details,
       });
-      // On continue car le paiement est déjà créé chez FedaPay
-      // L'utilisateur sera redirigé vers FedaPay
-    } else {
-      console.log('✅ Paiement enregistré en base:', payment?.id);
+
+      // Si l'abonnement a été créé mais le paiement échoue, on le supprime
+      if (subscriptionRecord && actualAbonnementId) {
+        await supabase
+          .from('abonnements')
+          .delete()
+          .eq('id', actualAbonnementId);
+        console.log('🗑️ Abonnement supprimé (paiement échoué)');
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: 'Erreur lors de l\'enregistrement du paiement',
+      });
+    }
+
+    console.log('✅ Paiement enregistré en base:', payment?.id);
+
+    // ============================================================
+    // 8. NOTIFICATION
+    // ============================================================
+    if (subscriptionRecord && actualAbonnementId) {
+      await supabase.from('notifications').insert({
+        user_id: user.id,
+        title: '⏳ Abonnement en attente',
+        body: `Votre abonnement ${description || 'Santé Plus'} est en attente de confirmation de paiement.`,
+        type: 'paiement',
+        data: {
+          subscription_id: actualAbonnementId,
+          status: 'en_attente',
+        },
+      });
     }
 
     // ============================================================
-    // 7. RÉPONSE
+    // 9. RÉPONSE
     // ============================================================
     const duration = Date.now() - startTime;
     console.log(`⏱️ Paiement généré en ${duration}ms`);
@@ -481,6 +604,7 @@ router.post('/generate-payment', async (req, res) => {
       checkout_url: paymentUrl,
       transaction_id: transaction.id,
       reference: transaction.reference || `FEDAPAY-${transaction.id}`,
+      subscription_id: actualAbonnementId,
       raw: transaction,
     });
 
@@ -685,8 +809,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       }
 
     } else if (subscriptionId) {
-      // ✅ ABONNEMENT
-      console.log('📦 Traitement abonnement...');
+      // ✅ ABONNEMENT - Mettre à jour de 'en_attente' à 'actif'
+      console.log('📦 Activation de l\'abonnement:', subscriptionId);
       result = await activateSubscription(paymentRecord, subscriptionId);
 
       if (result) {
