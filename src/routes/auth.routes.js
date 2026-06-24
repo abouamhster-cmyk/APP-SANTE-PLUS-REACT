@@ -906,28 +906,39 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
   }
 });
 
+
+
+
 // =============================================
-// ADMIN - APPROUVER UN AIDANT AVEC EMAIL ET RETRY
+// ADMIN - APPROUVER UN AIDANT AVEC EMAIL
 // =============================================
 router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
   const startTime = Date.now();
   let emailSent = false;
   let emailError = null;
 
+  console.log('🔴 ===== ROUTE APPROVE AIDANT APPELEE =====');
+  console.log('🔴 Body:', JSON.stringify(req.body, null, 2));
+  console.log('🔴 User ID:', req.user?.id);
+  console.log('🔴 User Role:', req.profile?.role);
+
   try {
     const { aidantId, comments } = req.body;
     const { user, profile } = req;
 
+    console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
+
+    // Vérification des droits
     if (profile.role !== 'admin' && profile.role !== 'coordinator') {
+      console.error('❌ [APPROVE] Non autorisé - Rôle:', profile.role);
       return res.status(403).json({
         success: false,
         error: 'Non autorisé à approuver des aidants',
       });
     }
 
-    console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
-
     // 1. Récupérer l'aidant avec son profil
+    console.log('🔍 [APPROVE] Récupération de l\'aidant...');
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*, user:profiles(*)')
@@ -935,16 +946,18 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       .single();
 
     if (aidantError || !aidant) {
-      console.error('❌ Erreur récupération aidant:', aidantError);
+      console.error('❌ [APPROVE] Erreur récupération aidant:', aidantError);
       return res.status(404).json({
         success: false,
         error: 'Aidant non trouvé',
       });
     }
 
-    console.log(`👤 Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
+    console.log(`👤 [APPROVE] Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
+    console.log(`👤 [APPROVE] Statut actuel: is_active=${aidant.user?.is_active}, aidant_status=${aidant.status}`);
 
     // 2. Mettre à jour le profil
+    console.log('🔍 [APPROVE] Mise à jour du profil...');
     const { error: profileUpdateError } = await supabase
       .from('profiles')
       .update({ 
@@ -954,14 +967,16 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       .eq('id', aidant.user_id);
 
     if (profileUpdateError) {
-      console.error('❌ Erreur mise à jour profil:', profileUpdateError);
+      console.error('❌ [APPROVE] Erreur mise à jour profil:', profileUpdateError);
       return res.status(500).json({
         success: false,
         error: 'Erreur lors de la mise à jour du profil',
       });
     }
+    console.log('✅ [APPROVE] Profil mis à jour');
 
     // 3. Mettre à jour l'aidant
+    console.log('🔍 [APPROVE] Mise à jour de l\'aidant...');
     const { error: aidantUpdateError } = await supabase
       .from('aidants')
       .update({ 
@@ -973,14 +988,16 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       .eq('id', aidantId);
 
     if (aidantUpdateError) {
-      console.error('❌ Erreur mise à jour aidant:', aidantUpdateError);
+      console.error('❌ [APPROVE] Erreur mise à jour aidant:', aidantUpdateError);
       return res.status(500).json({
         success: false,
         error: 'Erreur lors de la mise à jour de l\'aidant',
       });
     }
+    console.log('✅ [APPROVE] Aidant mis à jour');
 
     // 4. Mettre à jour l'inscription
+    console.log('🔍 [APPROVE] Mise à jour de l\'inscription...');
     await supabase
       .from('inscriptions')
       .update({ 
@@ -990,8 +1007,10 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
         processed_at: new Date().toISOString(),
       })
       .eq('user_id', aidant.user_id);
+    console.log('✅ [APPROVE] Inscription mise à jour');
 
     // 5. Notification
+    console.log('🔍 [APPROVE] Envoi notification...');
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
       title: '✅ Compte aidant validé !',
@@ -999,19 +1018,35 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
       type: 'system',
       is_read: false,
     });
+    console.log('✅ [APPROVE] Notification envoyée');
 
-    // 6. ✅ ENVOYER L'EMAIL D'APPROBATION AVEC RETRY
-    console.log('📧 Envoi email d\'approbation...');
-    const emailResult = await sendEmailWithLog(
-      { 
+    // 6. ✅ ENVOYER L'EMAIL D'APPROBATION
+    console.log('📧 [APPROVE] Préparation de l\'email...');
+    console.log('📧 [APPROVE] Email destinataire:', aidant.user?.email);
+    console.log('📧 [APPROVE] Nom destinataire:', aidant.user?.full_name || 'Aidant');
+
+    try {
+      const emailData = { 
         to: aidant.user?.email, 
         ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
-      },
-      'APPROVE'
-    );
+      };
+      console.log('📧 [APPROVE] Email data:', JSON.stringify(emailData, null, 2));
 
-    emailSent = emailResult.success;
-    emailError = emailResult.success ? null : emailResult.error;
+      const emailResult = await sendEmailWithLog(emailData, 'APPROVE');
+      emailSent = emailResult.success;
+      emailError = emailResult.success ? null : emailResult.error;
+
+      if (emailSent) {
+        console.log('✅ [APPROVE] Email d\'approbation envoyé avec succès');
+      } else {
+        console.warn('⚠️ [APPROVE] Échec envoi email d\'approbation:', emailError);
+      }
+
+    } catch (emailError) {
+      console.error('❌ [APPROVE] Erreur lors de l\'envoi de l\'email:', emailError);
+      emailSent = false;
+      emailError = emailError.message;
+    }
 
     const duration = Date.now() - startTime;
     console.log(`✅ [APPROVE] Aidant approuvé en ${duration}ms - Email: ${emailSent ? '✅' : '❌'}`);
@@ -1029,6 +1064,7 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
   } catch (error) {
     const duration = Date.now() - startTime;
     console.error(`❌ [APPROVE] Erreur après ${duration}ms:`, error);
+    console.error('❌ [APPROVE] Stack:', error.stack);
     res.status(500).json({
       success: false,
       error: error.message || 'Erreur lors de l\'approbation',
@@ -1039,12 +1075,15 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
 });
 
 // =============================================
-// ADMIN - REFUSER UN AIDANT AVEC EMAIL ET RETRY
+// ADMIN - REFUSER UN AIDANT AVEC EMAIL
 // =============================================
 router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
   const startTime = Date.now();
   let emailSent = false;
   let emailError = null;
+
+  console.log('🔴 ===== ROUTE REJECT AIDANT APPELEE =====');
+  console.log('🔴 Body:', JSON.stringify(req.body, null, 2));
 
   try {
     const { aidantId, comments } = req.body;
@@ -1077,7 +1116,7 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
     console.log(`👤 Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
 
     // 2. Mettre à jour l'aidant
-    const { error: aidantUpdateError } = await supabase
+    await supabase
       .from('aidants')
       .update({ 
         is_verified: false,
@@ -1085,14 +1124,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
         updated_at: new Date().toISOString(),
       })
       .eq('id', aidantId);
-
-    if (aidantUpdateError) {
-      console.error('❌ Erreur mise à jour aidant:', aidantUpdateError);
-      return res.status(500).json({
-        success: false,
-        error: 'Erreur lors de la mise à jour de l\'aidant',
-      });
-    }
 
     // 3. Mettre à jour l'inscription
     await supabase
@@ -1114,7 +1145,7 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
       is_read: false,
     });
 
-    // 5. ✅ ENVOYER L'EMAIL DE REFUS AVEC RETRY
+    // 5. ✅ ENVOYER L'EMAIL DE REFUS
     console.log('📧 Envoi email de refus...');
     const emailResult = await sendEmailWithLog(
       { 
@@ -1151,5 +1182,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
     });
   }
 });
+
 
 module.exports = router;
