@@ -344,6 +344,11 @@ router.get('/verify-payment', async (req, res) => {
 // ============================================================
 // 🔔 WEBHOOK FEDAPAY - VERSION FINALE
 // ============================================================
+// 📁 backend/src/routes/billing.js
+
+// ============================================================
+// 🔔 WEBHOOK FEDAPAY - VERSION FINALE AVEC RETRY AMÉLIORÉ
+// ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     let body = req.body;
@@ -380,37 +385,50 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log('💰 Transaction approuvée:', transactionId);
 
       // ============================================================
-      // RÉCUPÉRER LE PAIEMENT EN BASE
+      // RÉCUPÉRER LE PAIEMENT EN BASE AVEC RETRY AMÉLIORÉ
       // ============================================================
-      let payment = await supabase
-        .from('paiements')
-        .select('*')
-        .eq('reference', transactionId)
-        .maybeSingle()
-        .then(res => res.data);
+      let payment = null;
+      let attempts = 0;
+      const maxAttempts = 5;
+      const delayMs = 2000;
 
-      // ✅ RETRY si le paiement n'est pas encore en base
-      if (!payment) {
-        console.log('⏳ Paiement non trouvé, attente 2 secondes...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      while (attempts < maxAttempts && !payment) {
+        attempts++;
         
-        payment = await supabase
+        if (attempts > 1) {
+          console.log(`⏳ Tentative ${attempts}/${maxAttempts} - Attente ${delayMs}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        const { data, error } = await supabase
           .from('paiements')
           .select('*')
           .eq('reference', transactionId)
-          .maybeSingle()
-          .then(res => res.data);
+          .maybeSingle();
+
+        if (error) {
+          console.error(`❌ Erreur recherche paiement (tentative ${attempts}):`, error);
+          continue;
+        }
+
+        if (data) {
+          payment = data;
+          console.log(`✅ Paiement trouvé après ${attempts} tentative(s):`, payment.id);
+          break;
+        }
       }
 
       if (!payment) {
-        console.error('❌ Paiement non trouvé après réessai');
-        return res.status(404).json({
+        console.error(`❌ Paiement non trouvé après ${maxAttempts} tentatives`);
+        
+        // ✅ Même si le paiement n'est pas trouvé, on répond 200 à FedaPay
+        // pour éviter qu'il réessaie, mais on loggue l'erreur
+        return res.status(200).json({
           success: false,
-          error: 'Paiement non trouvé',
+          error: 'Paiement non trouvé, mais webhook accepté',
+          transaction_id: transactionId,
         });
       }
-
-      console.log('✅ Paiement trouvé en base:', payment.id);
 
       // ============================================================
       // EXTRAIRE LES MÉTADONNÉES DE LA BASE
@@ -455,7 +473,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         // ✅ COMMANDE PONCTUELLE
         console.log('📦 Création de la commande ponctuelle...');
 
-        // Vérifier les doublons
         const { data: existingOrders } = await supabase
           .from('commandes')
           .select('id')
@@ -515,31 +532,37 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         // ✅ ABONNEMENT
         console.log('📦 Activation de l\'abonnement:', subscriptionId);
 
-        const { data: subscription, error: subError } = await supabase
-          .from('abonnements')
-          .update({
-            status: 'actif',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', subscriptionId)
-          .select()
-          .single();
-
-        if (subError) {
-          console.error('❌ Erreur activation abonnement:', subError);
+        // ✅ Vérifier que subscriptionId est un UUID valide
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(subscriptionId)) {
+          console.error('❌ subscriptionId n\'est pas un UUID valide:', subscriptionId);
         } else {
-          console.log('✅ Abonnement activé:', subscriptionId);
-
-          await supabase.from('notifications').insert({
-            user_id: paymentRecord.user_id,
-            title: '✅ Abonnement activé !',
-            body: `Votre abonnement est maintenant actif.`,
-            type: 'paiement',
-            data: {
-              subscription_id: subscriptionId,
+          const { data: subscription, error: subError } = await supabase
+            .from('abonnements')
+            .update({
               status: 'actif',
-            },
-          });
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', subscriptionId)
+            .select()
+            .single();
+
+          if (subError) {
+            console.error('❌ Erreur activation abonnement:', subError);
+          } else {
+            console.log('✅ Abonnement activé:', subscriptionId);
+
+            await supabase.from('notifications').insert({
+              user_id: paymentRecord.user_id,
+              title: '✅ Abonnement activé !',
+              body: `Votre abonnement est maintenant actif.`,
+              type: 'paiement',
+              data: {
+                subscription_id: subscriptionId,
+                status: 'actif',
+              },
+            });
+          }
         }
       }
 
@@ -572,7 +595,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     console.error('❌ Webhook error:', error);
     console.error('❌ Stack:', error.stack);
 
-    return res.status(500).json({
+    // ✅ Toujours répondre 200 à FedaPay pour éviter qu'il réessaie
+    return res.status(200).json({
       success: false,
       error: error.message || 'Erreur interne du webhook',
     });
