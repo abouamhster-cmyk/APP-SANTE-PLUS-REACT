@@ -154,7 +154,7 @@ router.post('/generate-payment', async (req, res) => {
     // ============================================================
     // 5. CRÉER LA TRANSACTION FEDAPAY
     // ============================================================
-    // ✅ Construction des métadonnées - CRITIQUE pour le webhook
+    // ✅ Construction des métadonnées
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -165,7 +165,7 @@ router.post('/generate-payment', async (req, res) => {
       order_data: is_ponctual ? order_data : null,
     };
 
-    // ✅ Pour les commandes ponctuelles, on n'envoie PAS d'abonnement_id
+    // ✅ Pour les commandes ponctuelles, on supprime abonnement_id
     if (is_ponctual) {
       delete metadata.abonnement_id;
     }
@@ -189,7 +189,6 @@ router.post('/generate-payment', async (req, res) => {
     });
 
     console.log('✅ Transaction FedaPay créée:', transaction?.id);
-    console.log('📦 Métadonnées envoyées:', transaction?.metadata);
 
     const paymentUrl =
       transaction?.payment_url ||
@@ -206,22 +205,23 @@ router.post('/generate-payment', async (req, res) => {
     }
 
     // ============================================================
-    // 6. ENREGISTRER LE PAIEMENT EN BASE
+    // 6. ENREGISTRER LE PAIEMENT EN BASE (AVEC TOUTES LES MÉTADONNÉES)
     // ============================================================
     const paymentData = {
       user_id: user.id,
       amount: finalAmount,
       currency: 'XOF',
       method: 'fedapay',
-      reference: transaction.id,
+      reference: String(transaction.id),
       status: 'en_attente',
+      abonnement_id: is_ponctual ? null : abonnement_id || null,
       metadata: {
         description: description || 'Abonnement Santé Plus',
         plan_id: plan_id || null,
         abonnement_id: is_ponctual ? null : abonnement_id || null,
         order_id: order_id || null,
         is_ponctual: is_ponctual || false,
-        transaction_id: transaction.id,
+        transaction_id: String(transaction.id),
         payment_url: paymentUrl,
         order_data: is_ponctual ? order_data : null,
       },
@@ -302,9 +302,9 @@ router.get('/verify-payment', async (req, res) => {
     let query = supabase.from('paiements').select('*');
 
     if (transaction_id) {
-      query = query.eq('reference', transaction_id);
+      query = query.eq('reference', String(transaction_id));
     } else if (reference) {
-      query = query.eq('reference', reference);
+      query = query.eq('reference', String(reference));
     }
 
     const { data, error } = await query.single();
@@ -347,7 +347,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - VERSION PROFESSIONNELLE
+// 🔔 WEBHOOK FEDAPAY - VERSION CORRIGÉE
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
@@ -389,120 +389,82 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     // 3. TRAITER UNIQUEMENT LES TRANSACTIONS APPROUVÉES
     // ============================================================
     if (event === 'transaction.approved' || event === 'transaction.paid') {
-      const transactionId = data.id;
-      const metadata = data.metadata || {};
-
-      // ✅ EXTRACTION DES MÉTADONNÉES
-      const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
-      const subscriptionId = metadata.abonnement_id || null;
-      const orderData = metadata.order_data || null;
+      const transactionId = String(data.id);
 
       console.log('💰 Transaction approuvée:', transactionId);
-      console.log('📦 Métadonnées reçues:', metadata);
-      console.log('📦 is_ponctual:', isPonctual);
-      console.log('📦 subscriptionId:', subscriptionId);
-      console.log('📦 orderData:', orderData);
 
       // ============================================================
-      // 4. RECHERCHER OU CRÉER LE PAIEMENT
+      // 4. RÉCUPÉRER LE PAIEMENT EN BASE (avec ses métadonnées)
+      // ⚠️ C'est ICI la clé : on ne compte PAS sur les métadonnées de FedaPay
       // ============================================================
-      let paymentRecord;
-
-      // 4a. Rechercher le paiement existant
-      const { data: existingPayment, error: findError } = await supabase
+      const { data: payment, error: findError } = await supabase
         .from('paiements')
         .select('*')
         .eq('reference', transactionId)
         .maybeSingle();
 
-      if (findError) {
-        console.error('❌ Erreur recherche paiement:', findError);
-        return res.status(500).json({
+      if (findError || !payment) {
+        console.error('❌ Paiement non trouvé en base:', findError);
+        return res.status(404).json({
           success: false,
-          error: 'Erreur lors de la recherche du paiement',
-          details: findError.message,
+          error: 'Paiement non trouvé',
+          details: findError?.message,
         });
       }
 
-      // 4b. Si le paiement n'existe pas, le créer
-      if (!existingPayment) {
-        console.warn('⚠️ Paiement non trouvé pour transaction:', transactionId);
-        console.log('📝 Création du paiement depuis le webhook...');
+      console.log('✅ Paiement trouvé en base:', payment.id);
 
-        const { data: newPayment, error: createError } = await supabase
-          .from('paiements')
-          .insert({
-            user_id: metadata.user_id || null,
-            amount: data.amount || 0,
-            currency: 'XOF',
-            method: 'fedapay',
-            reference: transactionId,
-            status: 'valide',
-            paid_at: new Date().toISOString(),
-            provider_reference: transactionId,
-            metadata: {
-              is_ponctual: isPonctual,
-              order_data: isPonctual ? orderData : null,
-              transaction_id: transactionId,
-              abonnement_id: isPonctual ? null : subscriptionId,
-              plan_id: metadata.plan_id || null,
-            },
-          })
-          .select()
-          .single();
+      // ============================================================
+      // 5. EXTRAIRE LES MÉTADONNÉES DEPUIS LA BASE (PAS DEPUIS FEDAPAY)
+      // ============================================================
+      const metadata = payment.metadata || {};
+      const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
+      const subscriptionId = metadata.abonnement_id || null;
+      const orderData = metadata.order_data || null;
 
-        if (createError) {
-          console.error('❌ Erreur création paiement depuis webhook:', createError);
-          return res.status(500).json({
-            success: false,
-            error: 'Erreur lors de la création du paiement',
-            details: createError.message,
-          });
-        }
+      console.log('📦 is_ponctual (depuis base):', isPonctual);
+      console.log('📦 subscriptionId (depuis base):', subscriptionId);
+      console.log('📦 orderData (depuis base):', orderData);
 
-        console.log('✅ Paiement créé depuis le webhook:', newPayment.id);
-        paymentRecord = newPayment;
-      } else {
-        // 4c. Mettre à jour le paiement existant
-        console.log('✅ Paiement trouvé:', existingPayment.id);
+      // ============================================================
+      // 6. METTRE À JOUR LE STATUT DU PAIEMENT
+      // ============================================================
+      const { data: updatedPayment, error: updateError } = await supabase
+        .from('paiements')
+        .update({
+          status: 'valide',
+          paid_at: new Date().toISOString(),
+          provider_reference: transactionId,
+        })
+        .eq('id', payment.id)
+        .select()
+        .single();
 
-        const { data: updatedPayment, error: updateError } = await supabase
-          .from('paiements')
-          .update({
-            status: 'valide',
-            paid_at: new Date().toISOString(),
-            provider_reference: transactionId,
-          })
-          .eq('id', existingPayment.id)
-          .select()
-          .single();
-
-        if (updateError) {
-          console.error('❌ Erreur mise à jour paiement:', updateError);
-          return res.status(500).json({
-            success: false,
-            error: 'Erreur lors de la mise à jour du paiement',
-          });
-        }
-
-        paymentRecord = updatedPayment;
+      if (updateError) {
+        console.error('❌ Erreur mise à jour paiement:', updateError);
+        return res.status(500).json({
+          success: false,
+          error: 'Erreur lors de la mise à jour du paiement',
+        });
       }
 
+      const paymentRecord = updatedPayment;
+
       // ============================================================
-      // 5. TRAITER LA COMMANDE OU L'ABONNEMENT
+      // 7. TRAITER LA COMMANDE OU L'ABONNEMENT
       // ============================================================
       if (isPonctual) {
-        // ✅ 5a. COMMANDE PONCTUELLE
+        // ✅ 7a. COMMANDE PONCTUELLE
         console.log('📦 Création de la commande ponctuelle...');
 
-        // Vérifier si une commande existe déjà pour éviter les doublons
+        // Vérifier les doublons
         const { data: existingOrders, error: checkError } = await supabase
           .from('commandes')
           .select('id')
           .eq('family_id', paymentRecord.user_id)
           .eq('order_type', 'ponctual')
           .eq('is_paid', true)
-          .eq('metadata->>transaction_id', String(transactionId))
+          .eq('metadata->>transaction_id', transactionId)
           .limit(1);
 
         if (checkError) {
@@ -513,7 +475,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           console.log('ℹ️ Commande déjà créée pour cette transaction:', transactionId);
         } else {
           // ✅ Créer la commande
-          const orderDataToInsert = orderData || paymentRecord.metadata?.order_data || {};
+          const orderDataToInsert = orderData || {};
 
           const { data: newOrder, error: orderError } = await supabase
             .from('commandes')
@@ -562,7 +524,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           }
         }
       } else if (subscriptionId) {
-        // ✅ 5b. ABONNEMENT
+        // ✅ 7b. ABONNEMENT
         console.log('📦 Activation de l\'abonnement:', subscriptionId);
 
         const { data: subscription, error: subError } = await supabase
@@ -594,7 +556,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       }
 
       // ============================================================
-      // 6. NOTIFICATION DE PAIEMENT
+      // 8. NOTIFICATION DE PAIEMENT
       // ============================================================
       await supabase.from('notifications').insert({
         user_id: paymentRecord.user_id,
@@ -612,7 +574,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     }
 
     // ============================================================
-    // 7. AUTRES ÉVÉNEMENTS (ignorés)
+    // 9. AUTRES ÉVÉNEMENTS (ignorés)
     // ============================================================
     console.log('ℹ️ Événement ignoré:', event);
     return res.json({
@@ -632,84 +594,5 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     });
   }
 });
-
-// ============================================================
-// 🔧 FONCTION HELPER - Créer une commande ponctuelle
-// ============================================================
-async function createPonctualOrder(payment, metadata, transactionId) {
-  try {
-    const orderData = payment.metadata?.order_data || metadata?.order_data || {};
-
-    console.log('📦 Création commande ponctuelle...');
-    console.log('📦 orderData:', orderData);
-    console.log('📦 payment.user_id:', payment.user_id);
-
-    // ✅ Vérifier si une commande existe déjà pour éviter les doublons
-    const { data: existingOrders } = await supabase
-      .from('commandes')
-      .select('id')
-      .eq('family_id', payment.user_id)
-      .eq('order_type', 'ponctual')
-      .eq('is_paid', true)
-      .eq('metadata->>transaction_id', String(transactionId))
-      .limit(1);
-
-    if (existingOrders && existingOrders.length > 0) {
-      console.log('ℹ️ Commande déjà créée pour cette transaction:', transactionId);
-      return;
-    }
-
-    // ✅ Créer la commande
-    const { data: order, error: orderError } = await supabase
-      .from('commandes')
-      .insert({
-        patient_id: orderData.patient_id || null,
-        family_id: payment.user_id,
-        type: orderData.type || 'autre',
-        description: orderData.description || 'Commande ponctuelle',
-        address: orderData.address || 'Adresse non spécifiée',
-        status: 'creee',
-        estimated_amount: payment.amount || 0,
-        final_amount: payment.amount || 0,
-        items: orderData.items || [],
-        prescription_url: orderData.prescription_url || null,
-        order_type: 'ponctual',
-        is_paid: true,
-        metadata: {
-          payment_id: payment.id,
-          transaction_id: transactionId,
-          is_ponctual: true,
-        },
-      })
-      .select()
-      .single();
-
-    if (orderError) {
-      console.error('❌ Erreur création commande:', orderError);
-      console.error('❌ Détails:', orderError.message);
-      return;
-    }
-
-    console.log('✅ Commande ponctuelle créée:', order.id);
-
-    // ✅ NOTIFICATION DE CONFIRMATION
-    await supabase.from('notifications').insert({
-      user_id: payment.user_id,
-      title: '✅ Commande confirmée !',
-      body: `Votre commande "${orderData.description || 'Commande ponctuelle'}" a été enregistrée avec succès. Vous serez notifié de son avancement.`,
-      type: 'commande',
-      data: {
-        order_id: order.id,
-        status: 'creee',
-        message: 'Commande créée avec succès'
-      },
-    });
-
-    console.log('📧 Notification envoyée à l\'utilisateur:', payment.user_id);
-
-  } catch (error) {
-    console.error('❌ Erreur createPonctualOrder:', error);
-  }
-}
 
 module.exports = router;
