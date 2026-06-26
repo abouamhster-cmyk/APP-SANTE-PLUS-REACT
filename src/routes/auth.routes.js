@@ -960,6 +960,7 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
   }
 });
 
+ 
 // =============================================
 // ADMIN - APPROUVER UN AIDANT AVEC EMAIL
 // =============================================
@@ -977,12 +978,20 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
     const { aidantId, comments } = req.body;
     const { user, profile } = req;
 
+    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à approuver des aidants',
+      });
+    }
+
     console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
 
+    // ✅ ÉTAPE 1 : Récupérer l'aidant SANS la relation
     console.log('🔍 [APPROVE] Récupération de l\'aidant...');
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('*, user:profiles(*)')
+      .select('*')
       .eq('id', aidantId)
       .single();
 
@@ -994,9 +1003,24 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
       });
     }
 
-    console.log(`👤 [APPROVE] Aidant trouvé: ${aidant.user?.full_name} (${aidant.user?.email})`);
-    console.log(`👤 [APPROVE] Statut actuel: is_active=${aidant.user?.is_active}, aidant_status=${aidant.status}`);
+    // ✅ ÉTAPE 2 : Récupérer le profil utilisateur SÉPARÉMENT
+    const { data: userProfile, error: userProfileError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', aidant.user_id)
+      .single();
 
+    if (userProfileError) {
+      console.error('❌ [APPROVE] Erreur récupération profil:', userProfileError);
+    }
+
+    const userEmail = userProfile?.email || null;
+    const userName = userProfile?.full_name || 'Aidant';
+
+    console.log(`👤 [APPROVE] Aidant trouvé: ${userName} (${userEmail})`);
+    console.log(`👤 [APPROVE] Statut actuel: is_active=${userProfile?.is_active}, aidant_status=${aidant.status}`);
+
+    // ✅ ÉTAPE 3 : Mettre à jour le profil
     console.log('🔍 [APPROVE] Mise à jour du profil...');
     const { error: profileUpdateError } = await supabase
       .from('profiles')
@@ -1015,6 +1039,7 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
     }
     console.log('✅ [APPROVE] Profil mis à jour');
 
+    // ✅ ÉTAPE 4 : Mettre à jour l'aidant
     console.log('🔍 [APPROVE] Mise à jour de l\'aidant...');
     const { error: aidantUpdateError } = await supabase
       .from('aidants')
@@ -1035,6 +1060,7 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
     }
     console.log('✅ [APPROVE] Aidant mis à jour');
 
+    // ✅ ÉTAPE 5 : Mettre à jour l'inscription
     console.log('🔍 [APPROVE] Mise à jour de l\'inscription...');
     await supabase
       .from('inscriptions')
@@ -1047,28 +1073,27 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
       .eq('user_id', aidant.user_id);
     console.log('✅ [APPROVE] Inscription mise à jour');
 
+    // ✅ ÉTAPE 6 : Envoyer la notification
     console.log('🔍 [APPROVE] Envoi notification...');
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
       title: '✅ Compte aidant validé !',
-      body: `Félicitations ${aidant.user?.full_name || 'Aidant'} ! Votre compte a été validé. Vous pouvez maintenant accepter des missions et commencer à travailler.`,
+      body: `Félicitations ${userName} ! Votre compte a été validé. Vous pouvez maintenant accepter des missions et commencer à travailler.`,
       type: 'system',
       is_read: false,
     });
     console.log('✅ [APPROVE] Notification envoyée');
 
-    console.log('📧 [APPROVE] Préparation de l\'email...');
-    console.log('📧 [APPROVE] Email destinataire:', aidant.user?.email);
-    console.log('📧 [APPROVE] Nom destinataire:', aidant.user?.full_name || 'Aidant');
+    // ✅ ÉTAPE 7 : Envoyer l'email
+    if (userEmail) {
+      console.log(`📧 [APPROVE] Envoi email à: ${userEmail}`);
+      console.log(`📧 [APPROVE] Nom destinataire: ${userName}`);
 
-    if (aidant.user?.email) {
       try {
         const emailData = { 
-          to: aidant.user.email, 
-          ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
+          to: userEmail, 
+          ...templates.aidantApproved(userName) 
         };
-        console.log('📧 [APPROVE] Email data - to:', emailData.to);
-        console.log('📧 [APPROVE] Email data - subject:', emailData.subject);
 
         const emailResult = await sendEmailWithLog(emailData, 'APPROVE');
         emailSent = emailResult.success;
@@ -1077,11 +1102,10 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
         if (emailSent) {
           console.log('✅ [APPROVE] Email d\'approbation envoyé avec succès');
         } else {
-          console.warn('⚠️ [APPROVE] Échec envoi email d\'approbation:', emailError);
+          console.warn('⚠️ [APPROVE] Échec envoi email:', emailError);
         }
-
       } catch (emailErr) {
-        console.error('❌ [APPROVE] Erreur lors de l\'envoi de l\'email:', emailErr);
+        console.error('❌ [APPROVE] Erreur email:', emailErr);
         emailSent = false;
         emailError = emailErr.message;
       }
@@ -1116,7 +1140,6 @@ router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'c
     });
   }
 });
-
 // =============================================
 // ADMIN - REFUSER UN AIDANT AVEC EMAIL
 // =============================================
