@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/auth.routes.js
-// VERSION PRODUCTION - COMPLETE ET PROPRE
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -964,7 +963,7 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
 // =============================================
 // ADMIN - APPROUVER UN AIDANT AVEC EMAIL
 // =============================================
-router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
+router.post('/admin/approve-aidant', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   const startTime = Date.now();
   let emailSent = false;
   let emailError = null;
@@ -979,14 +978,6 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     const { user, profile } = req;
 
     console.log(`🔍 [APPROVE] Début approbation aidant ${aidantId}`);
-
-    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
-      console.error('❌ [APPROVE] Non autorisé - Rôle:', profile.role);
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à approuver des aidants',
-      });
-    }
 
     console.log('🔍 [APPROVE] Récupération de l\'aidant...');
     const { data: aidant, error: aidantError } = await supabase
@@ -1070,27 +1061,34 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
     console.log('📧 [APPROVE] Email destinataire:', aidant.user?.email);
     console.log('📧 [APPROVE] Nom destinataire:', aidant.user?.full_name || 'Aidant');
 
-    try {
-      const emailData = { 
-        to: aidant.user?.email, 
-        ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
-      };
-      console.log('📧 [APPROVE] Email data:', JSON.stringify(emailData, null, 2));
+    if (aidant.user?.email) {
+      try {
+        const emailData = { 
+          to: aidant.user.email, 
+          ...templates.aidantApproved(aidant.user?.full_name || 'Aidant') 
+        };
+        console.log('📧 [APPROVE] Email data - to:', emailData.to);
+        console.log('📧 [APPROVE] Email data - subject:', emailData.subject);
 
-      const emailResult = await sendEmailWithLog(emailData, 'APPROVE');
-      emailSent = emailResult.success;
-      emailError = emailResult.success ? null : emailResult.error;
+        const emailResult = await sendEmailWithLog(emailData, 'APPROVE');
+        emailSent = emailResult.success;
+        emailError = emailResult.success ? null : emailResult.error;
 
-      if (emailSent) {
-        console.log('✅ [APPROVE] Email d\'approbation envoyé avec succès');
-      } else {
-        console.warn('⚠️ [APPROVE] Échec envoi email d\'approbation:', emailError);
+        if (emailSent) {
+          console.log('✅ [APPROVE] Email d\'approbation envoyé avec succès');
+        } else {
+          console.warn('⚠️ [APPROVE] Échec envoi email d\'approbation:', emailError);
+        }
+
+      } catch (emailErr) {
+        console.error('❌ [APPROVE] Erreur lors de l\'envoi de l\'email:', emailErr);
+        emailSent = false;
+        emailError = emailErr.message;
       }
-
-    } catch (emailError) {
-      console.error('❌ [APPROVE] Erreur lors de l\'envoi de l\'email:', emailError);
+    } else {
+      console.warn('⚠️ [APPROVE] Email manquant pour l\'aidant');
       emailSent = false;
-      emailError = emailError.message;
+      emailError = 'Email destinataire manquant';
     }
 
     const duration = Date.now() - startTime;
@@ -1122,7 +1120,7 @@ router.post('/admin/approve-aidant', authMiddleware, async (req, res) => {
 // =============================================
 // ADMIN - REFUSER UN AIDANT AVEC EMAIL
 // =============================================
-router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
+router.post('/admin/reject-aidant', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   const startTime = Date.now();
   let emailSent = false;
   let emailError = null;
@@ -1133,13 +1131,6 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
   try {
     const { aidantId, comments } = req.body;
     const { user, profile } = req;
-
-    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à refuser des aidants',
-      });
-    }
 
     console.log(`🔍 [REJECT] Début refus aidant ${aidantId}`);
 
@@ -1187,16 +1178,22 @@ router.post('/admin/reject-aidant', authMiddleware, async (req, res) => {
     });
 
     console.log('📧 Envoi email de refus...');
-    const emailResult = await sendEmailWithLog(
-      { 
-        to: aidant.user?.email, 
-        ...templates.aidantRejected(aidant.user?.full_name || 'Aidant') 
-      },
-      'REJECT'
-    );
+    if (aidant.user?.email) {
+      const emailResult = await sendEmailWithLog(
+        { 
+          to: aidant.user.email, 
+          ...templates.aidantRejected(aidant.user?.full_name || 'Aidant') 
+        },
+        'REJECT'
+      );
 
-    emailSent = emailResult.success;
-    emailError = emailResult.success ? null : emailResult.error;
+      emailSent = emailResult.success;
+      emailError = emailResult.success ? null : emailResult.error;
+    } else {
+      console.warn('⚠️ [REJECT] Email manquant pour l\'aidant');
+      emailSent = false;
+      emailError = 'Email destinataire manquant';
+    }
 
     const duration = Date.now() - startTime;
     console.log(`✅ [REJECT] Aidant refusé en ${duration}ms - Email: ${emailSent ? '✅' : '❌'}`);
