@@ -925,6 +925,7 @@ router.post('/add-patient', authMiddleware, async (req, res) => {
 // =============================================
 // SUPPRIMER LE COMPTE (avec droits admin)
 // =============================================
+
 router.post('/delete-account', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.body;
@@ -937,20 +938,71 @@ router.post('/delete-account', authMiddleware, async (req, res) => {
       });
     }
 
+    // ✅ 1. Récupérer TOUS les patients liés
+    const { data: patientLinks, error: linkError } = await supabase
+      .from('patient_family_links')
+      .select('patient_id')
+      .eq('family_id', userId);
+
+    if (linkError) {
+      console.error('❌ Erreur récupération liens:', linkError);
+    }
+
+    const patientIds = patientLinks?.map(l => l.patient_id) || [];
+
+    // ✅ 2. Supprimer les patients (CASCADE)
+    if (patientIds.length > 0) {
+      const { error: deleteError } = await supabase
+        .from('patients')
+        .delete()
+        .in('id', patientIds);
+
+      if (deleteError) {
+        console.error('❌ Erreur suppression patients:', deleteError);
+      }
+    }
+
+    // ✅ 3. Supprimer les liens
+    await supabase
+      .from('patient_family_links')
+      .delete()
+      .eq('family_id', userId);
+
+    // ✅ 4. Supprimer les inscriptions
+    await supabase
+      .from('inscriptions')
+      .delete()
+      .eq('user_id', userId);
+
+    // ✅ 5. Supprimer les notifications
+    await supabase
+      .from('notifications')
+      .delete()
+      .eq('user_id', userId);
+
+    // ✅ 6. Supprimer les tokens push
+    await supabase
+      .from('push_tokens')
+      .delete()
+      .eq('user_id', userId);
+
+    // ✅ 7. Supprimer le profil
+    await supabase
+      .from('profiles')
+      .delete()
+      .eq('id', userId);
+
+    // ✅ 8. Supprimer l'utilisateur Auth
     const { error } = await supabase.auth.admin.deleteUser(userId);
 
-    if (error) {
-      console.error('❌ Erreur suppression utilisateur:', error);
-      return res.status(400).json({
-        success: false,
-        error: error.message || 'Erreur lors de la suppression',
-      });
-    }
+    if (error) throw error;
 
     res.json({
       success: true,
-      message: 'Compte supprimé avec succès',
+      message: 'Compte et tous ses proches supprimés avec succès',
+      patients_deleted: patientIds.length,
     });
+
   } catch (error) {
     console.error('❌ Delete account error:', error);
     res.status(500).json({
