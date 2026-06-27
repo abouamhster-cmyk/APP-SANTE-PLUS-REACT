@@ -2,20 +2,14 @@
 
 const express = require('express');
 const router = express.Router();
+const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
-const {
-  getActiveContract,
-  hasAcceptedContract,
-  acceptContract,
-  getLatestAcceptance,
-  getContractStatus,
-} = require('../services/contract.service');
 
 // Toutes les routes nécessitent une authentification
 router.use(authMiddleware);
 
 // =============================================
-// ROUTE: GET /api/contract/status
+// GET /api/contract/status
 // Récupère le statut du contrat pour l'utilisateur connecté
 // =============================================
 router.get('/status', async (req, res) => {
@@ -23,11 +17,17 @@ router.get('/status', async (req, res) => {
     const { role } = req.profile;
     const userId = req.user.id;
 
-    const status = await getContractStatus(userId, role);
+    // Appeler la fonction SQL get_contract_status
+    const { data, error } = await supabase.rpc('get_contract_status', {
+      p_user_id: userId,
+      p_role: role,
+    });
+
+    if (error) throw error;
 
     res.json({
       success: true,
-      ...status,
+      ...data,
     });
   } catch (error) {
     console.error('❌ Contract status error:', error);
@@ -39,30 +39,47 @@ router.get('/status', async (req, res) => {
 });
 
 // =============================================
-// ROUTE: GET /api/contract/active
+// GET /api/contract/active
 // Récupère le contrat actif pour le rôle de l'utilisateur
 // =============================================
 router.get('/active', async (req, res) => {
   try {
     const { role } = req.profile;
-    const userId = req.user.id;
 
-    const contract = await getActiveContract(role);
+    const { data, error } = await supabase
+      .from('contracts')
+      .select('*')
+      .eq('role', role)
+      .eq('is_active', true)
+      .order('version', { ascending: false })
+      .limit(1)
+      .single();
 
-    if (!contract) {
-      return res.status(404).json({
-        success: false,
-        error: 'Aucun contrat actif trouvé pour ce rôle',
-      });
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({
+          success: false,
+          error: 'Aucun contrat actif trouvé pour ce rôle',
+        });
+      }
+      throw error;
     }
 
-    const accepted = await hasAcceptedContract(userId, contract.id);
+    // Vérifier si déjà accepté
+    const { data: acceptance, error: acceptError } = await supabase
+      .from('contract_acceptances')
+      .select('id')
+      .eq('user_id', req.user.id)
+      .eq('contract_id', data.id)
+      .maybeSingle();
+
+    if (acceptError) throw acceptError;
 
     res.json({
       success: true,
-      contract,
-      accepted,
-      needs_acceptance: !accepted,
+      contract: data,
+      accepted: !!acceptance,
+      needs_acceptance: !acceptance,
     });
   } catch (error) {
     console.error('❌ Active contract error:', error);
@@ -74,7 +91,7 @@ router.get('/active', async (req, res) => {
 });
 
 // =============================================
-// ROUTE: POST /api/contract/accept
+// POST /api/contract/accept
 // Accepte le contrat pour l'utilisateur connecté
 // =============================================
 router.post('/accept', async (req, res) => {
@@ -90,25 +107,40 @@ router.post('/accept', async (req, res) => {
       });
     }
 
-    // Vérifier que le contrat existe et correspond au rôle
-    const contract = await getActiveContract(role);
-    if (!contract) {
+    // Vérifier que le contrat existe et est actif
+    const { data: contract, error: contractError } = await supabase
+      .from('contracts')
+      .select('*')
+      .eq('id', contract_id)
+      .eq('is_active', true)
+      .single();
+
+    if (contractError || !contract) {
       return res.status(404).json({
         success: false,
-        error: 'Aucun contrat actif trouvé',
+        error: 'Contrat non trouvé ou inactif',
       });
     }
 
-    if (contract.id !== contract_id) {
+    // Vérifier que le contrat correspond au rôle de l'utilisateur
+    if (contract.role !== role) {
       return res.status(400).json({
         success: false,
-        error: 'Le contrat fourni ne correspond pas au rôle de l\'utilisateur',
+        error: 'Ce contrat ne correspond pas à votre rôle',
       });
     }
 
     // Vérifier si déjà accepté
-    const alreadyAccepted = await hasAcceptedContract(userId, contract_id);
-    if (alreadyAccepted) {
+    const { data: existing, error: checkError } = await supabase
+      .from('contract_acceptances')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('contract_id', contract_id)
+      .maybeSingle();
+
+    if (checkError) throw checkError;
+
+    if (existing) {
       return res.status(400).json({
         success: false,
         error: 'Contrat déjà accepté',
@@ -119,13 +151,34 @@ router.post('/accept', async (req, res) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || null;
     const userAgent = req.headers['user-agent'] || null;
 
-    const acceptance = await acceptContract(userId, contract_id, ip, userAgent);
+    // Appeler la fonction SQL accept_contract
+    const { data: acceptanceId, error: acceptError } = await supabase.rpc('accept_contract', {
+      p_user_id: userId,
+      p_contract_id: contract_id,
+      p_ip_address: ip,
+      p_user_agent: userAgent,
+    });
+
+    if (acceptError) throw acceptError;
+
+    // Récupérer l'acceptation complète
+    const { data: acceptance, error: fetchError } = await supabase
+      .from('contract_acceptances')
+      .select(`
+        *,
+        contract:contracts(*)
+      `)
+      .eq('id', acceptanceId)
+      .single();
+
+    if (fetchError) throw fetchError;
 
     res.json({
       success: true,
       message: 'Contrat accepté avec succès',
       acceptance,
     });
+
   } catch (error) {
     console.error('❌ Accept contract error:', error);
     res.status(500).json({
@@ -136,7 +189,7 @@ router.post('/accept', async (req, res) => {
 });
 
 // =============================================
-// ROUTE: GET /api/contract/history
+// GET /api/contract/history
 // Récupère l'historique des acceptations de l'utilisateur
 // =============================================
 router.get('/history', async (req, res) => {
@@ -144,7 +197,7 @@ router.get('/history', async (req, res) => {
     const userId = req.user.id;
 
     const { data, error } = await supabase
-      .from('user_contract_acceptances')
+      .from('contract_acceptances')
       .select(`
         *,
         contract:contracts(*)
