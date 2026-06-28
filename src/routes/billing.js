@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/billing.js
-// ✅ VERSION CORRIGÉE
-
+ 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -215,7 +214,6 @@ async function createPendingSubscription(userId, offerId, offer) {
 
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
-    // ✅ Vérifier les doublons
     const { data: existingOrders, error: checkError } = await supabase
       .from('commandes')
       .select('id')
@@ -662,7 +660,6 @@ router.get('/verify-payment', async (req, res) => {
       });
     }
 
-    // ✅ Vérifier le statut en temps réel avec FedaPay
     try {
       const transaction = await Transaction.retrieve(data.reference);
       if (transaction && transaction.status === 'paid' && data.status !== 'valide') {
