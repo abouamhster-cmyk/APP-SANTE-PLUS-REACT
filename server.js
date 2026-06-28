@@ -1,5 +1,5 @@
 // 📁 backend/server.js
-
+ 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -20,11 +20,9 @@ const supabase = createClient(
 );
 
 // =============================================
-// MIDDLEWARES - Ordre IMPORTANT
+// MIDDLEWARES
 // =============================================
 app.use(helmet());
-
-// ✅ Activer trust proxy pour ngrok
 app.set('trust proxy', true);
 
 app.use(cors({
@@ -35,23 +33,20 @@ app.use(cors({
   credentials: true,
 }));
 
-// =============================================
-// ⚠️ IMPORTANT : Webhook FedaPay DOIT être avant express.json()
-// =============================================
+// ⚠️ IMPORTANT : Webhook FedaPay DOIT être AVANT express.json()
 app.use('/api/billing/webhook', express.raw({ type: 'application/json' }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-
 app.use(morgan('dev'));
 
-// Rate limiting - avec validation désactivée
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: { error: 'Trop de requêtes, veuillez réessayer plus tard' },
   validate: {
-    xForwardedForHeader: false, // ✅ Désactiver pour ngrok
+    xForwardedForHeader: false,
     trustProxy: false,
   },
 });
@@ -76,7 +71,6 @@ const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const offerRoutes = require('./src/routes/offers.routes');
 
-
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
 app.use('/api/visits', visitRoutes);
@@ -93,6 +87,27 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 
+// =============================================
+// ✅ REDIRECTION FEDAPAY (UNIQUE)
+// =============================================
+// Cette route reçoit la redirection après paiement
+// Elle utilise express.json() car c'est une redirection, pas un webhook
+app.post('/payment/confirm', express.json(), async (req, res) => {
+  console.log('📥 Redirection FedaPay reçue:', req.body);
+  
+  const { transaction_id, status } = req.body;
+  
+  // Mettre à jour le paiement si nécessaire
+  if (status === 'approved' || status === 'paid') {
+    await supabase
+      .from('paiements')
+      .update({ status: 'valide', paid_at: new Date().toISOString() })
+      .eq('reference', transaction_id);
+  }
+  
+  // Rediriger vers la page frontend de confirmation
+  res.redirect(`${process.env.CLIENT_URL}/payment/confirm?status=${status}&transaction_id=${transaction_id}`);
+});
 
 // =============================================
 // HEALTH CHECK
@@ -116,27 +131,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-
-// 📁 backend/server.js
-
-// Route de confirmation pour FedaPay
-app.post('/payment/confirm', express.json(), async (req, res) => {
-  console.log('📥 Confirmation FedaPay reçue:', req.body);
-  
-  const { transaction_id, status } = req.body;
-  
-  // Mettre à jour le paiement
-  if (status === 'approved' || status === 'paid') {
-    await supabase
-      .from('paiements')
-      .update({ status: 'valide', paid_at: new Date().toISOString() })
-      .eq('reference', transaction_id);
-  }
-  
-  // Rediriger vers la page frontend
-  res.redirect(`${process.env.CLIENT_URL}/payment/confirm?status=${status}&transaction_id=${transaction_id}`);
-});
-
 // =============================================
 // START SERVER
 // =============================================
@@ -145,6 +139,7 @@ app.listen(PORT, () => {
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`💳 Webhook FedaPay: http://localhost:${PORT}/api/billing/webhook`);
+  console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
 });
 
 module.exports = app;
