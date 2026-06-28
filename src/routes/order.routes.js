@@ -68,7 +68,6 @@ router.post('/', async (req, res) => {
       is_paid
     } = req.body;
 
-    // ✅ Vérifier les champs obligatoires
     if (!type) {
       return res.status(400).json({ error: 'Le champ "type" est obligatoire' });
     }
@@ -79,7 +78,6 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Le champ "address" est obligatoire' });
     }
 
-    // ✅ Construction de l'objet à insérer
     const orderData = {
       patient_id: patient_id || null,
       family_id: req.user.id,
@@ -89,7 +87,7 @@ router.post('/', async (req, res) => {
       estimated_amount: estimated_amount || 0,
       items: items || [],
       prescription_url: prescription_url || null,
-      status: 'creee',  // ✅ Statut initial
+      status: 'creee',
       order_type: order_type || 'subscription',
       is_paid: is_paid || false,
     };
@@ -109,7 +107,6 @@ router.post('/', async (req, res) => {
 
     console.log('✅ Commande créée avec succès, ID:', data.id);
 
-    // ✅ Récupérer les relations séparément
     let patient = null;
     if (data.patient_id) {
       const { data: patientData } = await supabase
@@ -136,7 +133,6 @@ router.post('/', async (req, res) => {
       family,
     };
 
-    // ✅ Notification aux coordinateurs
     try {
       const { data: coordinators } = await supabase
         .from('profiles')
@@ -179,7 +175,6 @@ router.post('/:id/status', async (req, res) => {
       return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
     }
 
-    // ✅ Statuts valides selon le cycle de vie simplifié
     const validStatuses = ['creee', 'en_cours', 'livree', 'validee', 'annulee'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ 
@@ -187,7 +182,6 @@ router.post('/:id/status', async (req, res) => {
       });
     }
 
-    // ✅ Vérifier que la commande existe
     const { data: existingOrder, error: checkError } = await supabase
       .from('commandes')
       .select('status, family_id, aidant_id')
@@ -198,14 +192,12 @@ router.post('/:id/status', async (req, res) => {
       return res.status(404).json({ error: 'Commande non trouvée' });
     }
 
-    // ✅ Si la commande est déjà validée ou annulée, bloquer les changements
     if (existingOrder.status === 'validee' || existingOrder.status === 'annulee') {
       return res.status(400).json({ 
         error: `Impossible de modifier une commande ${existingOrder.status}` 
       });
     }
 
-    // ✅ Mettre à jour le statut
     const { data, error } = await supabase
       .from('commandes')
       .update({ 
@@ -223,7 +215,6 @@ router.post('/:id/status', async (req, res) => {
 
     console.log(`✅ Commande ${id} mise à jour -> ${status}`);
 
-    // ✅ Récupérer les relations séparément
     let patient = null;
     if (data.patient_id) {
       const { data: patientData } = await supabase
@@ -261,7 +252,6 @@ router.post('/:id/status', async (req, res) => {
       aidant,
     };
 
-    // ✅ Notification à la famille
     if (data.family_id) {
       const statusLabels = {
         creee: 'créée',
@@ -299,7 +289,6 @@ router.post('/:id/accept', async (req, res) => {
     const { id } = req.params;
     const { user } = req;
 
-    // ✅ Récupérer l'aidant
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id')
@@ -310,7 +299,6 @@ router.post('/:id/accept', async (req, res) => {
       return res.status(404).json({ error: 'Aidant non trouvé' });
     }
 
-    // ✅ Mettre à jour le statut en 'en_cours' et assigner l'aidant
     const { data, error } = await supabase
       .from('commandes')
       .update({ 
@@ -331,13 +319,12 @@ router.post('/:id/accept', async (req, res) => {
 });
 
 // =============================================
-// ✅ PRÉPARER UNE COMMANDE (alias - garde le statut en_cours)
+// ✅ PRÉPARER UNE COMMANDE
 // =============================================
 router.post('/:id/prepare', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // ✅ On garde le statut 'en_cours' mais on met à jour la date
     const { data, error } = await supabase
       .from('commandes')
       .update({ 
@@ -356,7 +343,7 @@ router.post('/:id/prepare', async (req, res) => {
 });
 
 // =============================================
-// ✅ LIVRER UNE COMMANDE (passe en livree)
+// ✅ LIVRER UNE COMMANDE
 // =============================================
 router.post('/:id/deliver', async (req, res) => {
   try {
@@ -383,13 +370,12 @@ router.post('/:id/deliver', async (req, res) => {
 });
 
 // =============================================
-// ✅ VALIDER UNE COMMANDE (passe en validee)
+// ✅ VALIDER UNE COMMANDE
 // =============================================
 router.post('/:id/validate', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // ✅ Vérifier que la commande est livrée
     const { data: existingOrder, error: checkError } = await supabase
       .from('commandes')
       .select('status')
@@ -431,7 +417,6 @@ router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // ✅ Vérifier que la commande n'est pas déjà validée ou annulée
     const { data: existingOrder, error: checkError } = await supabase
       .from('commandes')
       .select('status')
@@ -489,7 +474,6 @@ router.get('/:id', async (req, res) => {
       throw error;
     }
 
-    // ✅ Vérifier les permissions
     if (profile.role === 'family' && data.family_id !== user.id) {
       return res.status(403).json({ error: 'Accès non autorisé' });
     }
@@ -506,7 +490,6 @@ router.get('/:id', async (req, res) => {
       }
     }
 
-    // ✅ Récupérer les relations séparément
     let patient = null;
     if (data.patient_id) {
       const { data: patientData } = await supabase
