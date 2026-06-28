@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/billing.js
-// VERSION PRODUCTION - ROBUSTE ET FIABLE
+// ✅ VERSION CORRIGÉE
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -33,10 +33,6 @@ if (!FEDAPAY_SECRET_KEY) {
 }
 
 console.log('💳 FEDAPAY_ENV:', FEDAPAY_ENV);
-console.log(
-  '💳 FEDAPAY_SECRET_KEY:',
-  FEDAPAY_SECRET_KEY ? FEDAPAY_SECRET_KEY.slice(0, 10) + '...' : 'AUCUNE CLÉ'
-);
 
 // ============================================================
 // HEALTH ROUTE
@@ -52,8 +48,9 @@ router.get('/health', (req, res) => {
 });
 
 // ============================================================
-// 🔧 FONCTION HELPER - RÉCUPÉRER UN PAIEMENT AVEC RETRY
+// 🔧 FONCTIONS HELPER
 // ============================================================
+
 async function findPaymentWithRetry(transactionId) {
   let payment = null;
   let attempts = 0;
@@ -91,20 +88,13 @@ async function findPaymentWithRetry(transactionId) {
   return payment;
 }
 
-// ============================================================
-// 🔧 FONCTION HELPER - VALIDER UN UUID
-// ============================================================
 function isValidUUID(uuid) {
   if (!uuid) return false;
   return UUID_REGEX.test(uuid);
 }
 
-// ============================================================
-// 🔧 FONCTION HELPER - RÉCUPÉRER UN PATIENT
-// ============================================================
 async function getOrCreatePatientId(userId) {
   try {
-    // 1. Rechercher un patient existant via les liens familiaux
     const { data: link, error: linkError } = await supabase
       .from('patient_family_links')
       .select('patient_id, patients!inner(id, first_name, last_name, status)')
@@ -117,7 +107,6 @@ async function getOrCreatePatientId(userId) {
       return link.patient_id;
     }
 
-    // 2. Rechercher un patient créé par l'utilisateur
     const { data: patient, error: patientError } = await supabase
       .from('patients')
       .select('id')
@@ -130,8 +119,6 @@ async function getOrCreatePatientId(userId) {
       return patient.id;
     }
 
-    // 3. Aucun patient trouvé - on retourne null
-    // L'abonnement sera créé sans patient (si la DB le permet)
     console.log('ℹ️ Aucun patient trouvé pour l\'utilisateur:', userId);
     return null;
 
@@ -141,9 +128,6 @@ async function getOrCreatePatientId(userId) {
   }
 }
 
-// ============================================================
-// 🔧 FONCTION HELPER - CRÉER UN ABONNEMENT EN ATTENTE
-// ============================================================
 async function createPendingSubscription(userId, offerId, offer) {
   try {
     const startDate = new Date();
@@ -165,7 +149,6 @@ async function createPendingSubscription(userId, offerId, offer) {
     const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
     const totalOrders = offer.total_orders || 0;
 
-    // Récupérer un patient si disponible
     const patientId = await getOrCreatePatientId(userId);
 
     console.log('📝 Création abonnement avec patient_id:', patientId);
@@ -187,7 +170,6 @@ async function createPendingSubscription(userId, offerId, offer) {
       updated_at: new Date().toISOString(),
     };
 
-    // Ajouter patient_id seulement s'il existe
     if (patientId) {
       subscriptionData.patient_id = patientId;
     }
@@ -199,7 +181,6 @@ async function createPendingSubscription(userId, offerId, offer) {
       .single();
 
     if (error) {
-      // Si l'erreur est due à patient_id null, on réessaie sans
       if (error.code === '23502' && error.message.includes('patient_id')) {
         console.log('⚠️ patient_id null non accepté, tentative sans patient...');
         delete subscriptionData.patient_id;
@@ -232,12 +213,9 @@ async function createPendingSubscription(userId, offerId, offer) {
   }
 }
 
-// ============================================================
-// 🔧 FONCTION HELPER - CRÉER UNE COMMANDE PONCTUELLE
-// ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
-    // Vérifier les doublons
+    // ✅ Vérifier les doublons
     const { data: existingOrders, error: checkError } = await supabase
       .from('commandes')
       .select('id')
@@ -259,7 +237,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     const orderDataToInsert = orderData || {};
 
-    // Validation des données minimales
     if (!orderDataToInsert.description) {
       orderDataToInsert.description = 'Commande ponctuelle';
     }
@@ -301,7 +278,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     console.log('✅ Commande ponctuelle créée:', newOrder.id);
 
-    // Notification
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Commande confirmée !',
@@ -321,9 +297,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   }
 }
 
-// ============================================================
-// 🔧 FONCTION HELPER - ACTIVER UN ABONNEMENT
-// ============================================================
 async function activateSubscription(paymentRecord, subscriptionId) {
   try {
     if (!isValidUUID(subscriptionId)) {
@@ -331,7 +304,6 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       return null;
     }
 
-    // Vérifier que l'abonnement existe
     const { data: existingSub, error: subCheckError } = await supabase
       .from('abonnements')
       .select('id, status, user_id')
@@ -365,7 +337,6 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 
     console.log('✅ Abonnement activé:', subscriptionId);
 
-    // Notification
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Abonnement activé !',
@@ -392,9 +363,6 @@ router.post('/generate-payment', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    // ============================================================
-    // 1. VÉRIFIER L'UTILISATEUR CONNECTÉ
-    // ============================================================
     const authHeader = req.headers.authorization || '';
     const token = authHeader.replace('Bearer ', '').trim();
 
@@ -417,9 +385,6 @@ router.post('/generate-payment', async (req, res) => {
 
     const user = authData.user;
 
-    // ============================================================
-    // 2. RÉCUPÉRER LE PROFIL
-    // ============================================================
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('full_name, email, phone')
@@ -430,9 +395,6 @@ router.post('/generate-payment', async (req, res) => {
       console.error('❌ Erreur récupération profil:', profileError.message);
     }
 
-    // ============================================================
-    // 3. LIRE LES DONNÉES DU FRONTEND
-    // ============================================================
     const {
       montant,
       amount,
@@ -449,7 +411,6 @@ router.post('/generate-payment', async (req, res) => {
 
     console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
     console.log('📥 abonnement_id reçu:', abonnement_id);
-    console.log('📥 order_data reçu:', order_data);
 
     const finalAmount = Number(montant || amount || 0);
 
@@ -485,14 +446,10 @@ router.post('/generate-payment', async (req, res) => {
     const callbackUrl = `${frontendUrl}/payment/confirm`;
     const cancelUrl = `${frontendUrl}/payment/confirm?status=cancel`;
 
-    // ============================================================
-    // 4. SI ABONNEMENT : CRÉER L'ABONNEMENT AVANT LE PAIEMENT
-    // ============================================================
     let subscriptionRecord = null;
     let actualAbonnementId = null;
 
     if (!is_ponctual && abonnement_id) {
-      // ✅ Vérifier que l'offre existe
       const { data: offer, error: offerError } = await supabase
         .from('offres')
         .select('id, name, type, price, visits_per_week, duration_days, total_visits, total_orders')
@@ -507,7 +464,6 @@ router.post('/generate-payment', async (req, res) => {
         });
       }
 
-      // ✅ Créer l'abonnement en statut 'en_attente'
       subscriptionRecord = await createPendingSubscription(user.id, offer.id, offer);
       if (!subscriptionRecord) {
         console.error('❌ Échec création abonnement');
@@ -521,9 +477,6 @@ router.post('/generate-payment', async (req, res) => {
       console.log('✅ Abonnement créé (en attente):', actualAbonnementId);
     }
 
-    // ============================================================
-    // 5. INITIALISER FEDAPAY
-    // ============================================================
     FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
     FedaPay.setEnvironment(FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live');
 
@@ -536,9 +489,6 @@ router.post('/generate-payment', async (req, res) => {
       abonnement_id: actualAbonnementId || null,
     });
 
-    // ============================================================
-    // 6. CRÉER LA TRANSACTION FEDAPAY
-    // ============================================================
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -587,9 +537,6 @@ router.post('/generate-payment', async (req, res) => {
       });
     }
 
-    // ============================================================
-    // 7. ENREGISTRER LE PAIEMENT EN BASE
-    // ============================================================
     const paymentData = {
       user_id: user.id,
       amount: finalAmount,
@@ -626,13 +573,7 @@ router.post('/generate-payment', async (req, res) => {
 
     if (dbError) {
       console.error('❌ ERREUR SAUVEGARDE PAIEMENT:', dbError.message);
-      console.error('❌ Détails:', {
-        code: dbError.code,
-        message: dbError.message,
-        details: dbError.details,
-      });
 
-      // Si l'abonnement a été créé mais le paiement échoue, on le supprime
       if (subscriptionRecord && actualAbonnementId) {
         await supabase
           .from('abonnements')
@@ -649,9 +590,6 @@ router.post('/generate-payment', async (req, res) => {
 
     console.log('✅ Paiement enregistré en base:', payment?.id);
 
-    // ============================================================
-    // 8. NOTIFICATION
-    // ============================================================
     if (subscriptionRecord && actualAbonnementId) {
       await supabase.from('notifications').insert({
         user_id: user.id,
@@ -665,9 +603,6 @@ router.post('/generate-payment', async (req, res) => {
       });
     }
 
-    // ============================================================
-    // 9. RÉPONSE
-    // ============================================================
     const duration = Date.now() - startTime;
     console.log(`⏱️ Paiement généré en ${duration}ms`);
 
@@ -686,19 +621,12 @@ router.post('/generate-payment', async (req, res) => {
     const duration = Date.now() - startTime;
     console.error(`❌ Erreur création transaction FedaPay (${duration}ms):`, err.message);
 
-    const fedapayErrors = err?.httpResponse?.data?.errors || null;
     const errorMessage = err?.httpResponse?.data?.message || err?.message || 'Impossible de créer la transaction FedaPay';
 
     return res.status(500).json({
       success: false,
       message: errorMessage,
       error: errorMessage,
-      errors: fedapayErrors,
-      details: process.env.NODE_ENV === 'development' ? {
-        name: err?.name,
-        message: err?.message,
-        stack: err?.stack,
-      } : undefined,
     });
   }
 });
@@ -734,7 +662,7 @@ router.get('/verify-payment', async (req, res) => {
       });
     }
 
-    // Vérifier le statut en temps réel avec FedaPay
+    // ✅ Vérifier le statut en temps réel avec FedaPay
     try {
       const transaction = await Transaction.retrieve(data.reference);
       if (transaction && transaction.status === 'paid' && data.status !== 'valide') {
@@ -766,16 +694,13 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - VERSION PRODUCTION
+// 🔔 WEBHOOK FEDAPAY
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
   let transactionId = null;
 
   try {
-    // ============================================================
-    // 1. PARSING ROBUSTE DU BODY
-    // ============================================================
     let body = req.body;
 
     if (Buffer.isBuffer(body)) {
@@ -789,9 +714,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     console.log('📥 Webhook reçu');
 
-    // ============================================================
-    // 2. EXTRACTION DES DONNÉES
-    // ============================================================
     const event = body?.event || body?.name;
     const data = body?.data || body?.entity;
 
@@ -806,9 +728,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     transactionId = String(data?.id);
     console.log(`📥 Événement reçu: ${event} | Transaction: ${transactionId}`);
 
-    // ============================================================
-    // 3. IGNORER LES ÉVÉNEMENTS NON PERTINENTS
-    // ============================================================
     if (event !== 'transaction.approved' && event !== 'transaction.paid') {
       console.log(`ℹ️ Événement ignoré: ${event}`);
       return res.status(200).json({
@@ -817,9 +736,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       });
     }
 
-    // ============================================================
-    // 4. RÉCUPÉRER LE PAIEMENT EN BASE AVEC RETRY
-    // ============================================================
     const payment = await findPaymentWithRetry(transactionId);
 
     if (!payment) {
@@ -831,9 +747,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       });
     }
 
-    // ============================================================
-    // 5. EXTRAIRE LES MÉTADONNÉES
-    // ============================================================
     const metadata = payment.metadata || {};
     const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
     const subscriptionId = metadata.abonnement_id || null;
@@ -845,9 +758,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       hasOrderData: !!orderData,
     });
 
-    // ============================================================
-    // 6. METTRE À JOUR LE STATUT DU PAIEMENT
-    // ============================================================
     const { data: updatedPayment, error: updateError } = await supabase
       .from('paiements')
       .update({
@@ -861,18 +771,12 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     if (updateError) {
       console.error('❌ Erreur mise à jour paiement:', updateError.message);
-      // On continue pour ne pas perdre la transaction
     }
 
     const paymentRecord = updatedPayment || payment;
-
-    // ============================================================
-    // 7. TRAITER SELON LE TYPE
-    // ============================================================
     let result = null;
 
     if (isPonctual) {
-      // ✅ COMMANDE PONCTUELLE
       console.log('📦 Traitement commande ponctuelle...');
       result = await createPonctualOrder(paymentRecord, transactionId, orderData);
 
@@ -883,7 +787,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       }
 
     } else if (subscriptionId) {
-      // ✅ ABONNEMENT - Mettre à jour de 'en_attente' à 'actif'
       console.log('📦 Activation de l\'abonnement:', subscriptionId);
       result = await activateSubscription(paymentRecord, subscriptionId);
 
@@ -896,9 +799,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.warn('⚠️ Aucun abonnement ni commande ponctuelle à traiter');
     }
 
-    // ============================================================
-    // 8. NOTIFICATION DE PAIEMENT (toujours envoyée)
-    // ============================================================
     try {
       await supabase.from('notifications').insert({
         user_id: paymentRecord.user_id,
@@ -911,9 +811,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.error('❌ Erreur notification paiement:', notifError.message);
     }
 
-    // ============================================================
-    // 9. RÉPONSE
-    // ============================================================
     const duration = Date.now() - startTime;
     console.log(`⏱️ Webhook traité en ${duration}ms`);
 
@@ -930,7 +827,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     console.error(`❌ Webhook error (${duration}ms):`, error.message);
     console.error('❌ Stack:', error.stack);
 
-    // Toujours répondre 200 pour éviter les réessais FedaPay
     return res.status(200).json({
       success: false,
       message: 'Erreur interne, webhook accepté',
