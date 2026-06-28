@@ -40,7 +40,6 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -90,14 +89,11 @@ app.use('/api/offers', offerRoutes);
 // =============================================
 // ✅ REDIRECTION FEDAPAY (UNIQUE)
 // =============================================
-// Cette route reçoit la redirection après paiement
-// Elle utilise express.json() car c'est une redirection, pas un webhook
 app.post('/payment/confirm', express.json(), async (req, res) => {
   console.log('📥 Redirection FedaPay reçue:', req.body);
   
   const { transaction_id, status } = req.body;
   
-  // Mettre à jour le paiement si nécessaire
   if (status === 'approved' || status === 'paid') {
     await supabase
       .from('paiements')
@@ -105,7 +101,6 @@ app.post('/payment/confirm', express.json(), async (req, res) => {
       .eq('reference', transaction_id);
   }
   
-  // Rediriger vers la page frontend de confirmation
   res.redirect(`${process.env.CLIENT_URL}/payment/confirm?status=${status}&transaction_id=${transaction_id}`);
 });
 
