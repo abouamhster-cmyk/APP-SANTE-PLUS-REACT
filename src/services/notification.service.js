@@ -1,5 +1,5 @@
 // 📁 backend/src/services/notification.service.js
-
+ 
 const admin = require('firebase-admin');
 const { supabase } = require('./supabase.service');
 
@@ -14,7 +14,9 @@ if (process.env.FIREBASE_PROJECT_ID) {
   });
 }
 
-// ✅ Enregistrer le token (backend)
+// =============================================
+// ✅ ENREGISTRER LE TOKEN
+// =============================================
 const registerToken = async (userId, token, deviceInfo) => {
   try {
     await supabase
@@ -34,7 +36,9 @@ const registerToken = async (userId, token, deviceInfo) => {
   }
 };
 
-// ✅ Supprimer le token (backend)
+// =============================================
+// ✅ SUPPRIMER LE TOKEN
+// =============================================
 const removeToken = async (token) => {
   try {
     await supabase
@@ -48,10 +52,11 @@ const removeToken = async (token) => {
   }
 };
 
-// ✅ Envoyer les notifications push (backend)
+// =============================================
+// ✅ ENVOYER LES NOTIFICATIONS PUSH
+// =============================================
 const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
-    // Récupérer les tokens
     const { data: tokens } = await supabase
       .from('push_tokens')
       .select('token')
@@ -61,7 +66,6 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
 
     const tokensList = tokens.map(t => t.token);
 
-    // Envoyer via Firebase Admin (backend)
     if (admin.apps.length > 0) {
       const message = {
         notification: { title, body },
@@ -80,10 +84,11 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
   }
 };
 
-// ✅ Créer une notification en base + envoyer push (backend)
+// =============================================
+// ✅ CRÉER UNE NOTIFICATION EN BASE + ENVOYER PUSH
+// =============================================
 const createNotification = async ({ userId, title, body, type, data = {} }) => {
   try {
-    // Sauvegarder en base
     const { data: notification, error } = await supabase
       .from('notifications')
       .insert({
@@ -99,7 +104,6 @@ const createNotification = async ({ userId, title, body, type, data = {} }) => {
 
     if (error) throw error;
 
-    // Envoyer push
     await sendPushNotification(userId, title, body, data);
 
     return notification;
@@ -109,9 +113,161 @@ const createNotification = async ({ userId, title, body, type, data = {} }) => {
   }
 };
 
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À TOUS LES AIDANTS D'UN PATIENT
+// =============================================
+const notifyPatientAidants = async (patientId, title, body, type, data = {}) => {
+  try {
+    // Récupérer les aidants assignés à ce patient
+    const { data: aidants, error } = await supabase
+      .from('patient_family_links')
+      .select('family_id, profiles!inner(role)')
+      .eq('patient_id', patientId)
+      .eq('profiles.role', 'aidant');
+
+    if (error) throw error;
+    if (!aidants || aidants.length === 0) return;
+
+    for (const link of aidants) {
+      await createNotification({
+        userId: link.family_id,
+        title,
+        body,
+        type,
+        data: { ...data, patient_id: patientId },
+      });
+    }
+  } catch (error) {
+    console.error('Notify patient aidants error:', error);
+  }
+};
+
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À TOUS LES ADMINISTRATEURS
+// =============================================
+const notifyAdmins = async (title, body, type, data = {}) => {
+  try {
+    const { data: admins, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .in('role', ['admin', 'coordinator']);
+
+    if (error) throw error;
+    if (!admins || admins.length === 0) return;
+
+    for (const admin of admins) {
+      await createNotification({
+        userId: admin.id,
+        title,
+        body,
+        type,
+        data,
+      });
+    }
+  } catch (error) {
+    console.error('Notify admins error:', error);
+  }
+};
+
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À TOUS LES AIDANTS DISPONIBLES
+// =============================================
+const notifyAvailableAidants = async (title, body, type, data = {}) => {
+  try {
+    const { data: aidants, error } = await supabase
+      .from('aidants')
+      .select('user_id')
+      .eq('available', true)
+      .eq('is_verified', true)
+      .eq('status', 'approved');
+
+    if (error) throw error;
+    if (!aidants || aidants.length === 0) return;
+
+    for (const aidant of aidants) {
+      await createNotification({
+        userId: aidant.user_id,
+        title,
+        body,
+        type,
+        data,
+      });
+    }
+  } catch (error) {
+    console.error('Notify available aidants error:', error);
+  }
+};
+
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À LA FAMILLE D'UN PATIENT
+// =============================================
+const notifyPatientFamily = async (patientId, title, body, type, data = {}) => {
+  try {
+    const { data: links, error } = await supabase
+      .from('patient_family_links')
+      .select('family_id')
+      .eq('patient_id', patientId);
+
+    if (error) throw error;
+    if (!links || links.length === 0) return;
+
+    for (const link of links) {
+      await createNotification({
+        userId: link.family_id,
+        title,
+        body,
+        type,
+        data: { ...data, patient_id: patientId },
+      });
+    }
+  } catch (error) {
+    console.error('Notify patient family error:', error);
+  }
+};
+
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À UN AIDANT SPÉCIFIQUE
+// =============================================
+const notifyAidant = async (aidantUserId, title, body, type, data = {}) => {
+  try {
+    await createNotification({
+      userId: aidantUserId,
+      title,
+      body,
+      type,
+      data,
+    });
+  } catch (error) {
+    console.error('Notify aidant error:', error);
+  }
+};
+
+// =============================================
+// ✅ ENVOYER UNE NOTIFICATION À UNE FAMILLE SPÉCIFIQUE
+// =============================================
+const notifyFamily = async (familyUserId, title, body, type, data = {}) => {
+  try {
+    await createNotification({
+      userId: familyUserId,
+      title,
+      body,
+      type,
+      data,
+    });
+  } catch (error) {
+    console.error('Notify family error:', error);
+  }
+};
+
 module.exports = {
   registerToken,
   removeToken,
   sendPushNotification,
   createNotification,
+  notifyPatientAidants,
+  notifyAdmins,
+  notifyAvailableAidants,
+  notifyPatientFamily,
+  notifyAidant,
+  notifyFamily,
 };
