@@ -1,4 +1,5 @@
 // 📁 backend/src/services/reminder.service.js
+// ✅ VERSION CORRIGÉE - AVEC JOBS POUR COMMANDES 15/30MIN
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -9,7 +10,6 @@ const { sendEmail, templates } = require('./email.service');
 // =============================================
 const sendVisitReminder = async (visitId) => {
   try {
-    // ✅ Récupérer la visite avec les infos
     const { data: visit, error } = await supabase
       .from('visites')
       .select(`
@@ -44,7 +44,6 @@ const sendVisitReminder = async (visitId) => {
         data: { visit_id: visit.id, patient_name: patientName, date: scheduledDate, time: scheduledTime },
       });
 
-      // ✅ Email à l'aidant
       try {
         await sendEmail({
           to: visit.aidant.user?.email,
@@ -81,7 +80,6 @@ const sendVisitReminder = async (visitId) => {
       }
     }
 
-    // ✅ 3. Mettre à jour le statut du rappel
     await supabase
       .from('visites')
       .update({
@@ -115,7 +113,6 @@ const sendDailyReminders = async () => {
     tomorrow.setDate(tomorrow.getDate() + 1);
     const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
-    // ✅ Récupérer les visites de demain
     const { data: visits, error } = await supabase
       .from('visites')
       .select('id')
@@ -150,7 +147,6 @@ const sendHourReminder = async () => {
     const currentTime = now.toTimeString().slice(0, 5);
     const currentDate = now.toISOString().split('T')[0];
 
-    // ✅ Récupérer les visites dans l'heure
     const { data: visits, error } = await supabase
       .from('visites')
       .select(`
@@ -159,14 +155,13 @@ const sendHourReminder = async () => {
         aidant:aidants(*, user:profiles(*))
       `)
       .eq('scheduled_date', currentDate)
-      .eq('status', 'planifiee')
+      .eq('status', 'acceptee')
       .gte('scheduled_time', currentTime)
       .lt('scheduled_time', inOneHour.toTimeString().slice(0, 5));
 
     if (error) throw error;
 
     for (const visit of visits) {
-      // ✅ Envoyer une notification push si l'aidant est assigné
       if (visit.aidant?.user_id) {
         await createNotification({
           userId: visit.aidant.user_id,
@@ -186,6 +181,179 @@ const sendHourReminder = async () => {
 };
 
 // =============================================
+// ✅ VÉRIFIER LES VISITES SANS RÉPONSE (24-48h)
+// =============================================
+const checkUnapprovedVisits = async () => {
+  try {
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now);
+    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+
+    const { data: visits, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants(*, user:profiles(*))
+      `)
+      .eq('status', 'planifiee')
+      .lt('created_at', twentyFourHoursAgo.toISOString())
+      .is('approved_at', null)
+      .is('refused_at', null);
+
+    if (error) throw error;
+
+    for (const visit of visits) {
+      // ✅ Passer en statut "expire"
+      await supabase
+        .from('visites')
+        .update({
+          status: 'expire',
+          metadata: {
+            ...(visit.metadata || {}),
+            expired_at: new Date().toISOString(),
+          }
+        })
+        .eq('id', visit.id);
+
+      // ✅ Notification à l'admin
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins) {
+        for (const admin of admins) {
+          await createNotification({
+            userId: admin.id,
+            title: '⚠️ Visite sans réponse - Réassignation nécessaire',
+            body: `La visite de ${visit.patient?.first_name} ${visit.patient?.last_name} le ${visit.scheduled_date} n'a pas reçu de réponse.`,
+            type: 'alert',
+            data: { visit_id: visit.id, action: 'reassign' },
+          });
+        }
+      }
+    }
+
+    return { success: true, expired: visits.length };
+  } catch (error) {
+    console.error('Check unapproved visits error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// =============================================
+// ✅ VÉRIFIER LES COMMANDES SANS RÉPONSE (15/30 MIN)
+// =============================================
+const checkUnansweredOrders = async () => {
+  try {
+    const now = new Date();
+
+    // ✅ 15 minutes - Relance
+    const fifteenMinutesAgo = new Date(now);
+    fifteenMinutesAgo.setMinutes(fifteenMinutesAgo.getMinutes() - 15);
+
+    // ✅ 30 minutes - Passer en disponible
+    const thirtyMinutesAgo = new Date(now);
+    thirtyMinutesAgo.setMinutes(thirtyMinutesAgo.getMinutes() - 30);
+
+    // ✅ 1. Commandes en attente depuis 15min (relance)
+    const { data: fifteenMinOrders, error: error15 } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('status', 'en_attente')
+      .lt('created_at', fifteenMinutesAgo.toISOString())
+      .gt('created_at', thirtyMinutesAgo.toISOString());
+
+    if (error15) throw error15;
+
+    for (const order of fifteenMinOrders) {
+      // ✅ Relancer l'aidant assigné
+      if (order.aidant_id) {
+        await createNotification({
+          userId: order.aidant_id,
+          title: '⏰ Commande urgente - En attente de prise',
+          body: `La commande "${order.description}" est en attente depuis 15 minutes.`,
+          type: 'commande',
+          data: { order_id: order.id, urgency: 'high' },
+        });
+      }
+    }
+
+    // ✅ 2. Commandes en attente depuis 30min (passer en disponible)
+    const { data: thirtyMinOrders, error: error30 } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('status', 'en_attente')
+      .lt('created_at', thirtyMinutesAgo.toISOString());
+
+    if (error30) throw error30;
+
+    for (const order of thirtyMinOrders) {
+      // ✅ Passer en disponible
+      await supabase
+        .from('commandes')
+        .update({
+          status: 'disponible',
+          updated_at: new Date().toISOString(),
+          metadata: {
+            ...(order.metadata || {}),
+            available_at: new Date().toISOString(),
+            no_response: true,
+          }
+        })
+        .eq('id', order.id);
+
+      // ✅ Notifier TOUS les aidants disponibles
+      const { data: aidants } = await supabase
+        .from('aidants')
+        .select('user_id')
+        .eq('available', true)
+        .eq('is_verified', true);
+
+      if (aidants && aidants.length > 0) {
+        for (const aidant of aidants) {
+          await createNotification({
+            userId: aidant.user_id,
+            title: '🚨 Commande urgente disponible',
+            body: `Commande "${order.description}" - Premier arrivé, premier servi !`,
+            type: 'commande',
+            data: { order_id: order.id, action: 'take', urgency: 'high' },
+          });
+        }
+      }
+
+      // ✅ Notification à l'admin
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins) {
+        for (const admin of admins) {
+          await createNotification({
+            userId: admin.id,
+            title: '⚠️ Commande sans réponse - Disponible à tous',
+            body: `La commande "${order.description}" est maintenant disponible à tous les aidants.`,
+            type: 'alert',
+            data: { order_id: order.id, action: 'monitor' },
+          });
+        }
+      }
+    }
+
+    return { 
+      success: true, 
+      relanced: fifteenMinOrders.length,
+      available: thirtyMinOrders.length 
+    };
+  } catch (error) {
+    console.error('Check unanswered orders error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// =============================================
 // NOTIFICATION POUR EXPIRATION D'ABONNEMENT
 // =============================================
 const checkSubscriptionExpiry = async () => {
@@ -195,7 +363,6 @@ const checkSubscriptionExpiry = async () => {
     inThreeDays.setDate(inThreeDays.getDate() + 3);
     const inThreeDaysStr = inThreeDays.toISOString().split('T')[0];
 
-    // ✅ Récupérer les abonnements qui expirent dans 3 jours
     const { data: subscriptions, error } = await supabase
       .from('abonnements')
       .select(`
@@ -217,7 +384,6 @@ const checkSubscriptionExpiry = async () => {
         data: { subscription_id: sub.id, expiry_date: sub.end_date },
       });
 
-      // ✅ Email d'expiration
       try {
         await sendEmail({
           to: sub.user?.email,
@@ -245,7 +411,6 @@ const checkExpiredSubscriptions = async () => {
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // ✅ Récupérer les abonnements expirés
     const { data: subscriptions, error } = await supabase
       .from('abonnements')
       .select(`
@@ -259,7 +424,6 @@ const checkExpiredSubscriptions = async () => {
     if (error) throw error;
 
     for (const sub of subscriptions) {
-      // ✅ Mettre à jour le statut
       await supabase
         .from('abonnements')
         .update({ status: 'expire' })
@@ -292,7 +456,6 @@ const checkMissedVisits = async () => {
     oneHourAgo.setHours(oneHourAgo.getHours() - 1);
     const oneHourAgoStr = oneHourAgo.toTimeString().slice(0, 5);
 
-    // ✅ Récupérer les visites qui auraient dû commencer
     const { data: visits, error } = await supabase
       .from('visites')
       .select(`
@@ -301,13 +464,12 @@ const checkMissedVisits = async () => {
         aidant:aidants(*, user:profiles(*))
       `)
       .eq('scheduled_date', today)
-      .eq('status', 'planifiee')
+      .eq('status', 'acceptee')
       .lt('scheduled_time', oneHourAgoStr);
 
     if (error) throw error;
 
     for (const visit of visits) {
-      // ✅ Notification à l'aidant
       if (visit.aidant?.user_id) {
         await createNotification({
           userId: visit.aidant.user_id,
@@ -318,7 +480,6 @@ const checkMissedVisits = async () => {
         });
       }
 
-      // ✅ Notification à la famille
       if (visit.patient) {
         const { data: links } = await supabase
           .from('patient_family_links')
@@ -350,6 +511,8 @@ module.exports = {
   sendVisitReminder,
   sendDailyReminders,
   sendHourReminder,
+  checkUnapprovedVisits,
+  checkUnansweredOrders,
   checkSubscriptionExpiry,
   checkExpiredSubscriptions,
   checkMissedVisits,
