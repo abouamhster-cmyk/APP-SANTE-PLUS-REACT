@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/order.routes.js
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -89,14 +89,13 @@ router.post('/', async (req, res) => {
       estimated_amount: estimated_amount || 0,
       items: items || [],
       prescription_url: prescription_url || null,
-      status: 'creee',
+      status: 'creee',  // ✅ Statut initial
       order_type: order_type || 'subscription',
       is_paid: is_paid || false,
     };
 
     console.log('📦 Données à insérer:', JSON.stringify(orderData, null, 2));
 
-    // ✅ Insérer la commande avec select pour récupérer les données
     const { data, error } = await supabase
       .from('commandes')
       .insert(orderData)
@@ -167,7 +166,7 @@ router.post('/', async (req, res) => {
 });
 
 // =============================================
-// METTRE À JOUR LE STATUT D'UNE COMMANDE
+// ✅ METTRE À JOUR LE STATUT D'UNE COMMANDE (UNIFIÉ)
 // =============================================
 router.post('/:id/status', async (req, res) => {
   try {
@@ -180,10 +179,39 @@ router.post('/:id/status', async (req, res) => {
       return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
     }
 
+    // ✅ Statuts valides selon le cycle de vie simplifié
+    const validStatuses = ['creee', 'en_cours', 'livree', 'validee', 'annulee'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ 
+        error: `Statut invalide. Statuts acceptés: ${validStatuses.join(', ')}` 
+      });
+    }
+
+    // ✅ Vérifier que la commande existe
+    const { data: existingOrder, error: checkError } = await supabase
+      .from('commandes')
+      .select('status, family_id, aidant_id')
+      .eq('id', id)
+      .single();
+
+    if (checkError) {
+      return res.status(404).json({ error: 'Commande non trouvée' });
+    }
+
+    // ✅ Si la commande est déjà validée ou annulée, bloquer les changements
+    if (existingOrder.status === 'validee' || existingOrder.status === 'annulee') {
+      return res.status(400).json({ 
+        error: `Impossible de modifier une commande ${existingOrder.status}` 
+      });
+    }
+
     // ✅ Mettre à jour le statut
     const { data, error } = await supabase
       .from('commandes')
-      .update({ status })
+      .update({ 
+        status,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', id)
       .select('*')
       .single();
@@ -235,13 +263,21 @@ router.post('/:id/status', async (req, res) => {
 
     // ✅ Notification à la famille
     if (data.family_id) {
+      const statusLabels = {
+        creee: 'créée',
+        en_cours: 'en cours',
+        livree: 'livrée',
+        validee: 'validée',
+        annulee: 'annulée',
+      };
+      
       try {
         await createNotification({
           userId: data.family_id,
-          title: 'Commande mise à jour',
-          body: `Votre commande est maintenant ${status}`,
+          title: '📦 Mise à jour commande',
+          body: `Votre commande est maintenant ${statusLabels[status] || status}`,
           type: 'commande',
-          data: { order_id: data.id },
+          data: { order_id: data.id, status },
         });
       } catch (notifError) {
         console.warn('⚠️ Erreur notification famille:', notifError);
@@ -256,14 +292,32 @@ router.post('/:id/status', async (req, res) => {
 });
 
 // =============================================
-// ACCEPTER UNE COMMANDE
+// ✅ ACCEPTER UNE COMMANDE (alias vers en_cours)
 // =============================================
 router.post('/:id/accept', async (req, res) => {
   try {
     const { id } = req.params;
+    const { user } = req;
+
+    // ✅ Récupérer l'aidant
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('user_id', user.id)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
+
+    // ✅ Mettre à jour le statut en 'en_cours' et assigner l'aidant
     const { data, error } = await supabase
       .from('commandes')
-      .update({ status: 'acceptee' })
+      .update({ 
+        status: 'en_cours',
+        aidant_id: aidant.id,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', id)
       .select('*')
       .single();
@@ -277,14 +331,18 @@ router.post('/:id/accept', async (req, res) => {
 });
 
 // =============================================
-// PRÉPARER UNE COMMANDE
+// ✅ PRÉPARER UNE COMMANDE (alias - garde le statut en_cours)
 // =============================================
 router.post('/:id/prepare', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ On garde le statut 'en_cours' mais on met à jour la date
     const { data, error } = await supabase
       .from('commandes')
-      .update({ status: 'en_preparation' })
+      .update({ 
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', id)
       .select('*')
       .single();
@@ -298,7 +356,7 @@ router.post('/:id/prepare', async (req, res) => {
 });
 
 // =============================================
-// LIVRER UNE COMMANDE
+// ✅ LIVRER UNE COMMANDE (passe en livree)
 // =============================================
 router.post('/:id/deliver', async (req, res) => {
   try {
@@ -308,8 +366,9 @@ router.post('/:id/deliver', async (req, res) => {
     const { data, error } = await supabase
       .from('commandes')
       .update({ 
-        status: 'livree', 
-        proof_url: proof_url || null 
+        status: 'livree',
+        proof_url: proof_url || null,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', id)
       .select('*')
@@ -324,14 +383,79 @@ router.post('/:id/deliver', async (req, res) => {
 });
 
 // =============================================
-// ANNULER UNE COMMANDE
+// ✅ VALIDER UNE COMMANDE (passe en validee)
+// =============================================
+router.post('/:id/validate', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ✅ Vérifier que la commande est livrée
+    const { data: existingOrder, error: checkError } = await supabase
+      .from('commandes')
+      .select('status')
+      .eq('id', id)
+      .single();
+
+    if (checkError) {
+      return res.status(404).json({ error: 'Commande non trouvée' });
+    }
+
+    if (existingOrder.status !== 'livree') {
+      return res.status(400).json({ 
+        error: 'Seules les commandes livrées peuvent être validées' 
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('commandes')
+      .update({ 
+        status: 'validee',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, order: data });
+  } catch (error) {
+    console.error('❌ Validate order error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ ANNULER UNE COMMANDE
 // =============================================
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Vérifier que la commande n'est pas déjà validée ou annulée
+    const { data: existingOrder, error: checkError } = await supabase
+      .from('commandes')
+      .select('status')
+      .eq('id', id)
+      .single();
+
+    if (checkError) {
+      return res.status(404).json({ error: 'Commande non trouvée' });
+    }
+
+    if (existingOrder.status === 'validee') {
+      return res.status(400).json({ error: 'Impossible d\'annuler une commande validée' });
+    }
+
+    if (existingOrder.status === 'annulee') {
+      return res.status(400).json({ error: 'Commande déjà annulée' });
+    }
+
     const { data, error } = await supabase
       .from('commandes')
-      .update({ status: 'annulee' })
+      .update({ 
+        status: 'annulee',
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', id)
       .select('*')
       .single();
