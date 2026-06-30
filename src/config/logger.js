@@ -2,37 +2,31 @@
 
 const winston = require('winston');
 const path = require('path');
+const fs = require('fs');
 
 // ============================================================
-// FORMATS PERSONNALISÉS
+// CRÉER LE DOSSIER LOGS
 // ============================================================
+const logDir = path.join(process.cwd(), 'logs');
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
 
+// ============================================================
+// FORMATS
+// ============================================================
 const logFormat = winston.format.combine(
   winston.format.timestamp({
     format: 'YYYY-MM-DD HH:mm:ss.SSS',
   }),
   winston.format.errors({ stack: true }),
   winston.format.splat(),
-  winston.format.json(),
-  winston.format.printf(({ timestamp, level, message, stack, ...meta }) => {
-    let log = `${timestamp} [${level.toUpperCase()}] ${message}`;
-    if (Object.keys(meta).length > 0) {
-      log += ` ${JSON.stringify(meta)}`;
-    }
-    if (stack) {
-      log += `\n${stack}`;
-    }
-    return log;
-  })
+  winston.format.json()
 );
 
 const consoleFormat = winston.format.combine(
-  winston.format.colorize({
-    all: true,
-  }),
-  winston.format.timestamp({
-    format: 'HH:mm:ss',
-  }),
+  winston.format.colorize({ all: true }),
+  winston.format.timestamp({ format: 'HH:mm:ss' }),
   winston.format.printf(({ timestamp, level, message, stack, ...meta }) => {
     let log = `${timestamp} [${level}] ${message}`;
     if (Object.keys(meta).length > 0 && process.env.NODE_ENV === 'development') {
@@ -46,40 +40,32 @@ const consoleFormat = winston.format.combine(
 );
 
 // ============================================================
-// CONFIGURATION DU LOGGER
+// CONFIGURATION
 // ============================================================
-
 const isProduction = process.env.NODE_ENV === 'production';
 const isDevelopment = process.env.NODE_ENV === 'development';
-
-// ✅ Créer le dossier logs s'il n'existe pas
-const fs = require('fs');
-const logDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir, { recursive: true });
-}
 
 const logger = winston.createLogger({
   level: isProduction ? 'info' : 'debug',
   format: logFormat,
   transports: [
-    // ✅ Fichier d'erreurs (toujours actif)
+    // ✅ Fichier d'erreurs
     new winston.transports.File({
       filename: path.join(logDir, 'error.log'),
       level: 'error',
-      maxsize: 10 * 1024 * 1024, // 10MB
+      maxsize: 10 * 1024 * 1024,
       maxFiles: 5,
     }),
-    // ✅ Fichier combiné (toujours actif)
+    // ✅ Fichier combiné
     new winston.transports.File({
       filename: path.join(logDir, 'combined.log'),
-      maxsize: 10 * 1024 * 1024, // 10MB
+      maxsize: 10 * 1024 * 1024,
       maxFiles: 5,
     }),
   ],
 });
 
-// ✅ Ajouter la console en développement
+// ✅ Console en développement
 if (isDevelopment) {
   logger.add(
     new winston.transports.Console({
@@ -88,7 +74,7 @@ if (isDevelopment) {
   );
 }
 
-// ✅ En production, logs JSON pour faciliter l'ingestion
+// ✅ JSON en production
 if (isProduction) {
   logger.add(
     new winston.transports.Console({
@@ -101,13 +87,11 @@ if (isProduction) {
 }
 
 // ============================================================
-// HELPERS DE LOGGING
+// HELPERS
 // ============================================================
-
 const logRequest = (req, res, next) => {
   const start = Date.now();
 
-  // ✅ Enregistrer la requête
   logger.info(`📥 ${req.method} ${req.path}`, {
     method: req.method,
     path: req.path,
@@ -117,7 +101,6 @@ const logRequest = (req, res, next) => {
     userId: req.user?.id || 'unauthenticated',
   });
 
-  // ✅ Écouter la fin de la réponse
   res.on('finish', () => {
     const duration = Date.now() - start;
     const level = res.statusCode >= 400 ? 'error' : 'info';
@@ -156,7 +139,6 @@ const logDebug = (message, meta = {}) => {
 // ============================================================
 // EXPORTS
 // ============================================================
-
 module.exports = {
   logger,
   logRequest,
