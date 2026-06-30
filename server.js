@@ -9,6 +9,8 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
+const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -127,6 +129,11 @@ app.use((err, req, res, next) => {
     error: err.message || 'Erreur interne du serveur',
   });
 });
+
+
+app.use(notFoundHandler);
+
+app.use(errorHandler);
 
 // =============================================
 // START SERVER
