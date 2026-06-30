@@ -11,6 +11,8 @@ const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
+const { setupSwagger } = require('./src/config/swagger');
+
 
 
 
@@ -124,6 +126,13 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+
+setupSwagger(app);
+
+app.use(notFoundHandler);
+
+app.use(errorHandler);
 
 // =============================================
 // ERROR HANDLER
