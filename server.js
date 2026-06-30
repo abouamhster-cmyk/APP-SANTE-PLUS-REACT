@@ -1,6 +1,8 @@
 // 📁 backend/server.js
  
 require('dotenv').config();
+const { validateEnv } = require('./src/config/validateEnv');
+validateEnv();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
