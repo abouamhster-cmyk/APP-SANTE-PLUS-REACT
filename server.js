@@ -1,8 +1,9 @@
 // 📁 backend/server.js
- 
+
 require('dotenv').config();
 const { validateEnv } = require('./src/config/validateEnv');
 validateEnv();
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -12,9 +13,6 @@ const { createClient } = require('@supabase/supabase-js');
 const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
-
-
-
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -33,8 +31,7 @@ const supabase = createClient(
 app.use(helmet());
 app.set('trust proxy', true);
 
-app.use(logRequest);  
-
+app.use(logRequest); // ✅ Logger
 
 app.use(cors({
   origin: [
@@ -98,7 +95,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 
 // =============================================
-// ✅ REDIRECTION FEDAPAY (UNIQUE)
+// ✅ REDIRECTION FEDAPAY
 // =============================================
 app.post('/payment/confirm', express.json(), async (req, res) => {
   console.log('📥 Redirection FedaPay reçue:', req.body);
@@ -127,26 +124,19 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-
+// =============================================
+// SWAGGER DOCUMENTATION
+// =============================================
 setupSwagger(app);
 
+// =============================================
+// 404 - Route non trouvée (UN SEUL)
+// =============================================
 app.use(notFoundHandler);
 
-app.use(errorHandler);
-
 // =============================================
-// ERROR HANDLER
+// GESTIONNAIRE D'ERREURS GLOBAL (UN SEUL)
 // =============================================
-app.use((err, req, res, next) => {
-  console.error('❌ Error:', err);
-  res.status(err.status || 500).json({
-    error: err.message || 'Erreur interne du serveur',
-  });
-});
-
-
-app.use(notFoundHandler);
-
 app.use(errorHandler);
 
 // =============================================
@@ -156,6 +146,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Santé Plus API running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📚 Swagger: http://localhost:${PORT}/api/docs`);
   console.log(`💳 Webhook FedaPay: http://localhost:${PORT}/api/billing/webhook`);
   console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
 });
