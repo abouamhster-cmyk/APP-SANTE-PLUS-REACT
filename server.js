@@ -10,6 +10,8 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
+const { logRequest } = require('./src/config/logger');
+
 
 
 const app = express();
@@ -28,6 +30,9 @@ const supabase = createClient(
 // =============================================
 app.use(helmet());
 app.set('trust proxy', true);
+
+app.use(logRequest);  
+
 
 app.use(cors({
   origin: [
