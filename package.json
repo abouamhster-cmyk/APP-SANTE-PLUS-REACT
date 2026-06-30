@@ -21,7 +21,8 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "multer": "^2.2.0",
-    "uuid": "^14.0.0"
+    "uuid": "^14.0.0",
+    "joi": "^17.13.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
