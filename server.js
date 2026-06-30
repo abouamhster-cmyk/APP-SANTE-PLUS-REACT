@@ -13,6 +13,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
+const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -93,6 +94,8 @@ app.use('/api/contract', contractRoutes);
 app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
+app.use('/api/aidants', aidantCatalogRoutes); 
+
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
