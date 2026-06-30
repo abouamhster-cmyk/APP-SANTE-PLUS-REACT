@@ -5,9 +5,7 @@ const {
   getAidantById,
   assignAidantToPatient,
   getFamilyAssignments,
-  getAidantAssignments,
   revokeAssignment,
-  updateAidantAvailability,
 } = require('../services/aidantCatalog.service');
 const { asyncWrapper } = require('../utils/errorHandler');
 
@@ -81,7 +79,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
     });
   }
 
-  const assignment = await assignAidantToPatient(
+  const result = await assignAidantToPatient(
     aidantId,
     familyId,
     patientId,
@@ -91,7 +89,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
   res.status(201).json({
     success: true,
     message: 'Aidant assigné avec succès',
-    data: assignment,
+    data: result,
   });
 });
 
@@ -109,31 +107,18 @@ const getMyAssignments = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// RÉCUPÉRER LES ASSIGNATIONS D'UN AIDANT (ADMIN)
-// ============================================================
-const getAidantAssignmentsList = asyncWrapper(async (req, res) => {
-  const { aidantId } = req.params;
-  const assignments = await getAidantAssignments(aidantId);
-
-  res.json({
-    success: true,
-    data: assignments,
-  });
-});
-
-// ============================================================
 // RÉVOQUER UNE ASSIGNATION
 // ============================================================
 const revokeAssignmentController = asyncWrapper(async (req, res) => {
   const { id } = req.params;
   const familyId = req.user.id;
 
-  const assignment = await revokeAssignment(id, familyId);
+  const result = await revokeAssignment(id, familyId);
 
   res.json({
     success: true,
     message: 'Assignation révoquée avec succès',
-    data: assignment,
+    data: result,
   });
 });
 
@@ -145,6 +130,5 @@ module.exports = {
   getAidant,
   assignAidant,
   getMyAssignments,
-  getAidantAssignmentsList,
   revokeAssignmentController,
 };
